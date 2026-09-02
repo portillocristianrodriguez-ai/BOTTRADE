@@ -1,6 +1,5 @@
 """Consulta y gestiona las posiciones abiertas en Alpaca."""
 print( TEST ALPACA FUNCIONANDO)
-import logging
 
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
