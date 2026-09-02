@@ -5,8 +5,13 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.requests import (
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+    GetOrdersRequest,
+)
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -86,8 +91,23 @@ def comprar(ticker: str, precio: float) -> str | None:
     return mensaje
 
 
+def _cancelar_ordenes_abiertas(ticker: str) -> None:
+    """Cancela las órdenes abiertas (p. ej. stop-loss/take-profit pendientes de
+    un bracket order) de un ticker concreto. Necesario antes de vender, porque
+    esas órdenes 'reservan' las acciones (held_for_orders) e impiden cerrar
+    la posición con close_position()."""
+    filtro = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
+    ordenes = trading_client.get_orders(filter=filtro)
+    for orden in ordenes:
+        try:
+            trading_client.cancel_order_by_id(orden.id)
+        except Exception as e:
+            log.warning(f"No se pudo cancelar orden {orden.id} de {ticker}: {e}")
+
+
 def vender(ticker: str) -> str | None:
     try:
+        _cancelar_ordenes_abiertas(ticker)
         trading_client.close_position(ticker)
         mensaje = f"VENTA {ticker}: posición cerrada."
         log.info(mensaje)
