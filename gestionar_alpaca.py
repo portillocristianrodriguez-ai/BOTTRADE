@@ -1,8 +1,8 @@
 """Todo lo que toca la API de Alpaca: traer datos y ejecutar órdenes."""
- 
+
 import logging
 from datetime import datetime, timedelta
- 
+
 import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
@@ -10,19 +10,19 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
- 
+
 import config
- 
+
 log = logging.getLogger(__name__)
- 
+
 trading_client = TradingClient(config.API_KEY, config.API_SECRET, paper=config.PAPER)
 data_client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
- 
- 
+
+
 def mercado_abierto() -> bool:
     return trading_client.get_clock().is_open
- 
- 
+
+
 def obtener_datos(ticker: str, minutos_historia: int = 500) -> pd.DataFrame:
     request = StockBarsRequest(
         symbol_or_symbols=ticker,
@@ -33,20 +33,20 @@ def obtener_datos(ticker: str, minutos_historia: int = 500) -> pd.DataFrame:
     if bars.empty:
         return pd.DataFrame()
     return bars.xs(ticker, level=0) if isinstance(bars.index, pd.MultiIndex) else bars
- 
- 
+
+
 def tiene_posicion_abierta(ticker: str) -> bool:
     try:
         trading_client.get_open_position(ticker)
         return True
     except Exception:
         return False
- 
- 
+
+
 def contar_posiciones_abiertas() -> int:
     return len(trading_client.get_all_positions())
- 
- 
+
+
 def calcular_tamano_posicion(precio: float) -> int:
     cuenta = trading_client.get_account()
     capital = float(cuenta.equity)
@@ -55,8 +55,8 @@ def calcular_tamano_posicion(precio: float) -> int:
     if riesgo_por_accion <= 0:
         return 0
     return max(int(riesgo_dolares / riesgo_por_accion), 0)
- 
- 
+
+
 def comprar(ticker: str, precio: float) -> str | None:
     """Ejecuta una compra con bracket order (stop-loss + take-profit incluidos).
     Devuelve un mensaje descriptivo, o None si no se ejecutó nada."""
@@ -64,10 +64,10 @@ def comprar(ticker: str, precio: float) -> str | None:
     if cantidad <= 0:
         log.warning(f"{ticker}: tamaño de posición calculado es 0, se omite orden.")
         return None
- 
+
     stop_loss = round(precio * (1 - config.STOP_LOSS_PCT), 2)
     take_profit = round(precio * (1 + config.TAKE_PROFIT_PCT), 2)
- 
+
     orden = MarketOrderRequest(
         symbol=ticker,
         qty=cantidad,
@@ -84,8 +84,8 @@ def comprar(ticker: str, precio: float) -> str | None:
     )
     log.info(mensaje)
     return mensaje
- 
- 
+
+
 def vender(ticker: str) -> str | None:
     try:
         trading_client.close_position(ticker)
