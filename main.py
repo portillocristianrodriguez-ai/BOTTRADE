@@ -47,6 +47,14 @@ def revisar_ticker(ticker: str):
             notificaciones.notificar(mensaje)
 
 
+def ciclo():
+    for ticker in config.TICKERS:
+        try:
+            revisar_ticker(ticker)
+        except Exception as e:
+            # Un error en un ticker no debe tirar abajo el resto del ciclo.
+            log.error(f"Error procesando {ticker}: {e}")
+
 
 def main():
     config.validar()
