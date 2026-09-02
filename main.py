@@ -49,6 +49,7 @@ def revisar_ticker(ticker: str):
 
 
 def ciclo():
+    gestionar_alpaca.revisar_posiciones
     for ticker in config.TICKERS:
         try:
             revisar_ticker(ticker)
