@@ -1,5 +1,5 @@
 
-"""
+      """
 Configuración del bot. Todo se lee de variables de entorno para poder
 deployar en Railway sin exponer claves en el código.
 
@@ -55,6 +55,9 @@ CRYPTO_CHECK_INTERVAL_MINUTES = _int("CRYPTO_CHECK_INTERVAL_MINUTES", 1)
 RISK_PER_TRADE_PCT = _float("RISK_PER_TRADE_PCT", 0.02)
 STOP_LOSS_PCT = _float("STOP_LOSS_PCT", 0.02)
 TAKE_PROFIT_PCT = _float("TAKE_PROFIT_PCT", 0.04)
+ATR_STOP_MULTIPLICADOR = _float("ATR_STOP_MULTIPLICADOR", 1.5)  # distancia del stop = ATR * este valor
+ATR_TAKE_PROFIT_MULTIPLICADOR = _float("ATR_TAKE_PROFIT_MULTIPLICADOR", 3.0)
+TRAILING_STOP_PCT = _float("TRAILING_STOP_PCT", 0.015)  # solo cripto: retroceso desde el máximo que dispara venta
 MAX_POSICIONES_ABIERTAS = _int("MAX_POSICIONES_ABIERTAS", 3)
 
 EMA_RAPIDA = _int("EMA_RAPIDA", 9)
