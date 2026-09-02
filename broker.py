@@ -1,4 +1,4 @@
-"""Todo lo que toca la API de Alpaca: traer datos y ejecutar órdenes.
+""""Todo lo que toca la API de Alpaca: traer datos y ejecutar órdenes.
 
 Soporta dos tipos de ticker:
 - Acciones (ej. "AAPL"): usan bracket orders (stop-loss + take-profit
@@ -87,13 +87,28 @@ def perdida_pct_no_realizada(ticker: str) -> float | None:
         return None
 
 
-def calcular_tamano_posicion(ticker: str, precio: float):
-    """Devuelve cantidad entera para acciones, o fraccionaria (float) para cripto."""
+def precio_actual_posicion(ticker: str):
+    """Devuelve (precio_entrada, precio_actual) de una posición abierta,
+    o None si no existe. Se usa para el trailing stop manual de cripto."""
+    try:
+        posicion = trading_client.get_open_position(ticker.replace("/", ""))
+        return float(posicion.avg_entry_price), float(posicion.current_price)
+    except Exception:
+        return None
+
+
+def calcular_tamano_posicion(ticker: str, precio: float, atr: float):
+    """Devuelve cantidad entera para acciones, o fraccionaria (float) para
+    cripto. El riesgo por operación se calcula sobre la distancia real al
+    stop (ATR * ATR_STOP_MULTIPLICADOR), no sobre un % fijo del precio —
+    así el tamaño se adapta a la volatilidad real de cada activo."""
     cuenta = trading_client.get_account()
     capital = float(cuenta.equity)
     riesgo_dolares = capital * config.RISK_PER_TRADE_PCT
-    riesgo_por_unidad = precio * config.STOP_LOSS_PCT
-    if riesgo_por_unidad <= 0:
+
+    riesgo_por_unidad = atr * config.ATR_STOP_MULTIPLICADOR
+    if riesgo_por_unidad <= 0 or pd.isna(riesgo_por_unidad):
+        # Sin ATR válido, no arriesgamos con un tamaño mal calculado.
         return 0
 
     if es_cripto(ticker):
@@ -102,11 +117,13 @@ def calcular_tamano_posicion(ticker: str, precio: float):
     return max(int(riesgo_dolares / riesgo_por_unidad), 0)
 
 
-def comprar(ticker: str, precio: float) -> str | None:
+def comprar(ticker: str, precio: float, atr: float) -> str | None:
     """Compra un ticker (acción o cripto). Para acciones usa bracket order
-    (con stop-loss/take-profit); para cripto, orden simple de mercado, ya
-    que Alpaca no soporta bracket orders en cripto."""
-    cantidad = calcular_tamano_posicion(ticker, precio)
+    con stop-loss/take-profit calculados a partir del ATR (distancia
+    proporcional a la volatilidad real, no un % fijo). Para cripto, orden
+    simple de mercado, ya que Alpaca no soporta bracket orders en cripto —
+    la salida depende del stop-loss/trailing manual en main.py."""
+    cantidad = calcular_tamano_posicion(ticker, precio, atr)
     if cantidad <= 0:
         log.warning(f"{ticker}: tamaño de posición calculado es 0, se omite orden.")
         return None
@@ -121,13 +138,14 @@ def comprar(ticker: str, precio: float) -> str | None:
         trading_client.submit_order(orden)
         mensaje = (
             f"COMPRA {ticker}: {cantidad} unidades @ ~${precio:.2f} "
-            f"(sin SL/TP automático — cripto no soporta bracket orders)"
+            f"(sin SL/TP automático — gestionado por stop-loss/trailing manual)"
         )
         log.info(mensaje)
         return mensaje
 
-    stop_loss = round(precio * (1 - config.STOP_LOSS_PCT), 2)
-    take_profit = round(precio * (1 + config.TAKE_PROFIT_PCT), 2)
+    stop_loss = round(precio - atr * config.ATR_STOP_MULTIPLICADOR, 2)
+    take_profit = round(precio + atr * config.ATR_TAKE_PROFIT_MULTIPLICADOR, 2)
+    stop_loss = max(stop_loss, 0.01)  # nunca negativo ni cero
 
     orden = MarketOrderRequest(
         symbol=ticker,
@@ -141,7 +159,8 @@ def comprar(ticker: str, precio: float) -> str | None:
     trading_client.submit_order(orden)
     mensaje = (
         f"COMPRA {ticker}: {cantidad} acciones @ ~${precio:.2f} "
-        f"(SL: ${stop_loss}, TP: ${take_profit})"
+        f"(SL: ${stop_loss} [ATR x{config.ATR_STOP_MULTIPLICADOR}], "
+        f"TP: ${take_profit} [ATR x{config.ATR_TAKE_PROFIT_MULTIPLICADOR}])"
     )
     log.info(mensaje)
     return mensaje
