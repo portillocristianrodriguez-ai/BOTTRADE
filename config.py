@@ -1,3 +1,4 @@
+
 """
 Configuración del bot. Todo se lee de variables de entorno para poder
 deployar en Railway sin exponer claves en el código.
@@ -6,14 +7,21 @@ Variables requeridas en Railway (Settings -> Variables):
   ALPACA_API_KEY
   ALPACA_API_SECRET
   ALPACA_PAPER            (true/false, default: true)
-  TICKERS                 (ej: "AAPL,MSFT,NVDA,TSLA,AMZN")
-  CHECK_INTERVAL_MINUTES  (default: 5)
+  TICKERS                 (acciones, ej: "AAPL,MSFT,NVDA,TSLA,AMZN")
+  CRYPTO_TICKERS          (cripto 24/7, ej: "BTC/USD,ETH/USD")
+  CHECK_INTERVAL_MINUTES         (acciones, default: 5)
+  CRYPTO_CHECK_INTERVAL_MINUTES  (cripto, default: 1)
   RISK_PER_TRADE_PCT      (default: 0.02)
   STOP_LOSS_PCT           (default: 0.02)
   TAKE_PROFIT_PCT         (default: 0.04)
   MAX_POSICIONES_ABIERTAS (default: 3)
   TELEGRAM_BOT_TOKEN      (opcional, para notificaciones)
   TELEGRAM_CHAT_ID        (opcional, para notificaciones)
+
+Nota sobre cripto: Alpaca no soporta bracket orders (stop-loss / take-profit
+automáticos) para cripto, solo para acciones. Las posiciones de cripto se
+cierran únicamente cuando la estrategia genera señal VENDER — no hay stop-loss
+automático como con las acciones.
 """
 
 import os
@@ -40,7 +48,10 @@ PAPER = _bool("ALPACA_PAPER", True)
 
 TICKERS = [t.strip().upper() for t in os.environ.get("TICKERS", "AAPL,MSFT,NVDA,TSLA,AMZN").split(",") if t.strip()]
 
+CRYPTO_TICKERS = [t.strip().upper() for t in os.environ.get("CRYPTO_TICKERS", "").split(",") if t.strip()]
+
 CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 5)
+CRYPTO_CHECK_INTERVAL_MINUTES = _int("CRYPTO_CHECK_INTERVAL_MINUTES", 1)
 RISK_PER_TRADE_PCT = _float("RISK_PER_TRADE_PCT", 0.02)
 STOP_LOSS_PCT = _float("STOP_LOSS_PCT", 0.02)
 TAKE_PROFIT_PCT = _float("TAKE_PROFIT_PCT", 0.04)
@@ -48,9 +59,14 @@ MAX_POSICIONES_ABIERTAS = _int("MAX_POSICIONES_ABIERTAS", 3)
 
 EMA_RAPIDA = _int("EMA_RAPIDA", 9)
 EMA_LENTA = _int("EMA_LENTA", 21)
+EMA_TENDENCIA = _int("EMA_TENDENCIA", 200)
 RSI_PERIODO = _int("RSI_PERIODO", 14)
 RSI_SOBRECOMPRA = _int("RSI_SOBRECOMPRA", 70)
 RSI_SOBREVENTA = _int("RSI_SOBREVENTA", 30)
+ATR_PERIODO = _int("ATR_PERIODO", 14)
+ATR_MIN_PCT = _float("ATR_MIN_PCT", 0.003)  # volatilidad mínima para operar (0.3% del precio)
+VOLUMEN_SMA_PERIODO = _int("VOLUMEN_SMA_PERIODO", 20)
+VOLUMEN_MIN_MULTIPLICADOR = _float("VOLUMEN_MIN_MULTIPLICADOR", 1.0)  # volumen actual >= media * este valor
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
