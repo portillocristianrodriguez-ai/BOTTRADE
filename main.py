@@ -12,7 +12,6 @@ import config
 import broker
 import estrategia
 import notificaciones
-import gestionar_alpaca
 
 logging.basicConfig(
     level=logging.INFO,
