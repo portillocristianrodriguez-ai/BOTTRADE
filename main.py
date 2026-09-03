@@ -143,10 +143,6 @@ def proteger_compra_ejecutada(
         f"de posición para protección."
     )
 
-    # ========================================================
-    # ESPERAR POSICIÓN
-    # ========================================================
-
     posicion = None
 
     for intento in range(6):
@@ -190,10 +186,6 @@ def proteger_compra_ejecutada(
 
         return
 
-    # ========================================================
-    # OBTENER ATR
-    # ========================================================
-
     atr = obtener_atr_actual(
         ticker
     )
@@ -212,10 +204,6 @@ def proteger_compra_ejecutada(
         )
 
         return
-
-    # ========================================================
-    # CREAR PROTECCIÓN
-    # ========================================================
 
     mensaje_proteccion = None
 
@@ -266,10 +254,6 @@ def proteger_compra_ejecutada(
 
         time.sleep(2)
 
-    # ========================================================
-    # VERIFICACIÓN FINAL
-    # ========================================================
-
     for intento in range(5):
 
         try:
@@ -306,10 +290,6 @@ def proteger_compra_ejecutada(
 
         time.sleep(2)
 
-    # ========================================================
-    # FALLÓ
-    # ========================================================
-
     log.error(
         f"{ticker}: NO SE PUDO VERIFICAR "
         f"LA PROTECCIÓN."
@@ -332,10 +312,6 @@ def revisar_ticker(
 
     try:
 
-        # ====================================================
-        # DATOS
-        # ====================================================
-
         df = broker.obtener_datos(
             ticker
         )
@@ -348,17 +324,9 @@ def revisar_ticker(
 
             return
 
-        # ====================================================
-        # INDICADORES
-        # ====================================================
-
         df = estrategia.calcular_indicadores(
             df
         )
-
-        # ====================================================
-        # SEÑAL
-        # ====================================================
 
         senal = estrategia.generar_senal(
             df,
@@ -370,10 +338,6 @@ def revisar_ticker(
         precio_actual = float(
             actual["close"]
         )
-
-        # ====================================================
-        # ATR
-        # ====================================================
 
         atr_actual = None
 
@@ -395,10 +359,6 @@ def revisar_ticker(
 
             atr_actual = None
 
-        # ====================================================
-        # POSICIÓN
-        # ====================================================
-
         posicion_abierta = (
             broker.tiene_posicion_abierta(
                 ticker
@@ -414,7 +374,7 @@ def revisar_ticker(
         )
 
         # ====================================================
-        # PROTEGER POSICIONES EXISTENTES
+        # PROTECCIÓN DE ACCIONES
         # ====================================================
 
         if (
@@ -446,7 +406,7 @@ def revisar_ticker(
                 )
 
         # ====================================================
-        # CRIPTO
+        # GESTIÓN DE CRIPTO
         # ====================================================
 
         if (
@@ -454,15 +414,15 @@ def revisar_ticker(
             and broker.es_cripto(ticker)
         ):
 
-            # ------------------------------------------------
-            # STOP LOSS
-            # ------------------------------------------------
-
             perdida_pct = (
                 broker.perdida_pct_no_realizada(
                     ticker
                 )
             )
+
+            # -----------------------------------------------
+            # STOP LOSS MANUAL
+            # -----------------------------------------------
 
             if (
                 perdida_pct is not None
@@ -503,9 +463,9 @@ def revisar_ticker(
 
                 return
 
-            # ------------------------------------------------
+            # -----------------------------------------------
             # TRAILING STOP
-            # ------------------------------------------------
+            # -----------------------------------------------
 
             info_posicion = (
                 broker.precio_actual_posicion(
@@ -586,7 +546,7 @@ def revisar_ticker(
                     return
 
         # ====================================================
-        # COMPRA
+        # COMPRAR
         # ====================================================
 
         if (
@@ -605,10 +565,6 @@ def revisar_ticker(
 
             with _lock_operaciones:
 
-                # ============================================
-                # RE-COMPROBAR POSICIÓN
-                # ============================================
-
                 if broker.tiene_posicion_abierta(
                     ticker
                 ):
@@ -620,10 +576,6 @@ def revisar_ticker(
                     )
 
                     return
-
-                # ============================================
-                # COMPROBAR ÓRDENES PENDIENTES
-                # ============================================
 
                 ordenes = (
                     broker.obtener_ordenes_ticker(
@@ -675,10 +627,6 @@ def revisar_ticker(
 
                     return
 
-                # ============================================
-                # MÁXIMO DE POSICIONES
-                # ============================================
-
                 if (
                     broker.contar_posiciones_abiertas()
                     >= config.MAX_POSICIONES_ABIERTAS
@@ -691,19 +639,11 @@ def revisar_ticker(
 
                     return
 
-                # ============================================
-                # COMPRAR
-                # ============================================
-
                 mensaje = broker.comprar(
                     ticker,
                     precio_actual,
                     atr_actual,
                 )
-
-            # =================================================
-            # NOTIFICAR
-            # =================================================
 
             if mensaje:
 
@@ -714,7 +654,7 @@ def revisar_ticker(
             return
 
         # ====================================================
-        # VENTA POR SEÑAL
+        # VENDER
         # ====================================================
 
         if (
@@ -751,216 +691,6 @@ def revisar_ticker(
             f"{ticker}: error general en "
             f"revisar_ticker: {e}"
         )
-
-
-# ============================================================
-# COMANDOS TELEGRAM
-# ============================================================
-
-def procesar_comando_telegram(
-    comando: str,
-):
-
-    comando = str(
-        comando
-    ).strip().lower()
-
-    # ========================================================
-    # SALDO
-    # ========================================================
-
-    if comando == "/saldo":
-
-        datos = (
-            broker.obtener_resumen_cuenta()
-        )
-
-        if not datos:
-
-            return (
-                "❌ No se pudo obtener "
-                "el saldo de la cuenta."
-            )
-
-        beneficio = datos[
-            "beneficio_dia"
-        ]
-
-        beneficio_posiciones = datos[
-            "beneficio_posiciones"
-        ]
-
-        emoji_dia = (
-            "🟢"
-            if beneficio >= 0
-            else "🔴"
-        )
-
-        emoji_posiciones = (
-            "🟢"
-            if beneficio_posiciones >= 0
-            else "🔴"
-        )
-
-        return (
-            "💰 SALDO DE LA CUENTA\n\n"
-
-            f"Capital total: "
-            f"${datos['equity']:,.2f}\n"
-
-            f"Disponible: "
-            f"${datos['cash']:,.2f}\n"
-
-            f"Buying Power: "
-            f"${datos['buying_power']:,.2f}\n\n"
-
-            "📊 RESULTADO DEL DÍA\n"
-
-            f"{emoji_dia} "
-            f"${beneficio:+,.2f}\n\n"
-
-            "📈 POSICIONES ABIERTAS\n"
-
-            f"{datos['numero_posiciones']}\n\n"
-
-            "📊 P/L NO REALIZADO\n"
-
-            f"{emoji_posiciones} "
-            f"${beneficio_posiciones:+,.2f}"
-        )
-
-    # ========================================================
-    # POSICIONES
-    # ========================================================
-
-    if comando == "/posiciones":
-
-        posiciones = (
-            broker.obtener_posiciones_telegram()
-        )
-
-        if not posiciones:
-
-            return (
-                "📭 No hay posiciones abiertas."
-            )
-
-        mensaje = (
-            "📊 POSICIONES ABIERTAS\n\n"
-        )
-
-        for posicion in posiciones:
-
-            beneficio = posicion[
-                "beneficio"
-            ]
-
-            emoji = (
-                "🟢"
-                if beneficio >= 0
-                else "🔴"
-            )
-
-            mensaje += (
-                f"{emoji} "
-                f"{posicion['simbolo']}\n"
-
-                f"Cantidad: "
-                f"{posicion['cantidad']}\n"
-
-                f"Entrada: "
-                f"${posicion['entrada']:.2f}\n"
-
-                f"Actual: "
-                f"${posicion['actual']:.2f}\n"
-
-                f"P/L: "
-                f"${beneficio:+,.2f} "
-                f"({posicion['beneficio_pct']:+.2f}%)\n\n"
-            )
-
-        return mensaje
-
-    # ========================================================
-    # ESTADO
-    # ========================================================
-
-    if comando == "/estado":
-
-        datos = (
-            broker.obtener_resumen_cuenta()
-        )
-
-        if not datos:
-
-            return (
-                "❌ No se pudo obtener "
-                "el estado del bot."
-            )
-
-        beneficio = datos[
-            "beneficio_dia"
-        ]
-
-        emoji = (
-            "🟢"
-            if beneficio >= 0
-            else "🔴"
-        )
-
-        return (
-            "📊 ESTADO DEL BOT\n\n"
-
-            f"🤖 {config.BOT_NOMBRE}\n\n"
-
-            f"Modo: "
-            f"{'PAPER' if config.PAPER else 'REAL'}\n"
-
-            f"{emoji} Resultado del día: "
-            f"${beneficio:+,.2f}\n"
-
-            f"💰 Equity: "
-            f"${datos['equity']:,.2f}\n"
-
-            f"📈 Posiciones: "
-            f"{datos['numero_posiciones']}\n"
-
-            f"🛡️ Protección de acciones: "
-            f"ACTIVA"
-        )
-
-    # ========================================================
-    # START / HELP
-    # ========================================================
-
-    if comando in (
-        "/start",
-        "/help",
-    ):
-
-        return (
-            "🤖 COMANDOS DISPONIBLES\n\n"
-
-            "/saldo\n"
-            "💰 Saldo, resultado del día "
-            "y P/L abierto.\n\n"
-
-            "/posiciones\n"
-            "📈 Posiciones abiertas "
-            "y beneficio/pérdida.\n\n"
-
-            "/estado\n"
-            "📊 Estado general del bot."
-        )
-
-    # ========================================================
-    # DESCONOCIDO
-    # ========================================================
-
-    return (
-        "❓ Comando no reconocido.\n\n"
-        "Usa /help para ver los comandos."
-    )
 
 
 # ============================================================
@@ -1035,10 +765,6 @@ def loop_ejecuciones():
         "[ejecuciones] Monitor de órdenes iniciado."
     )
 
-    # ========================================================
-    # IGNORAR ÓRDENES ANTIGUAS
-    # ========================================================
-
     try:
 
         broker.inicializar_monitor_ejecuciones()
@@ -1049,10 +775,6 @@ def loop_ejecuciones():
             f"[ejecuciones] Error inicializando "
             f"monitor: {e}"
         )
-
-    # ========================================================
-    # MONITOR
-    # ========================================================
 
     while True:
 
@@ -1079,10 +801,6 @@ def loop_ejecuciones():
                         False,
                     )
 
-                    # ========================================
-                    # TELEGRAM
-                    # ========================================
-
                     if mensaje:
 
                         notificaciones.notificar(
@@ -1094,10 +812,6 @@ def loop_ejecuciones():
                             f"{ticker}: "
                             f"notificación enviada."
                         )
-
-                    # ========================================
-                    # PROTEGER COMPRA
-                    # ========================================
 
                     if (
                         compra_accion
@@ -1192,13 +906,6 @@ def loop_cripto():
 
 def recuperar_protecciones():
 
-    """
-    Comprueba todas las posiciones de acciones
-    existentes cuando arranca Railway.
-
-    Si alguna no tiene protección, intenta crearla.
-    """
-
     try:
 
         posiciones = (
@@ -1284,10 +991,170 @@ def recuperar_protecciones():
 
 
 # ============================================================
+# COMANDOS TELEGRAM
+# ============================================================
+
+def procesar_comando_telegram(
+    comando,
+):
+
+    # --------------------------------------------------------
+    # /saldo
+    # --------------------------------------------------------
+
+    if comando == "/saldo":
+
+        datos = broker.obtener_resumen_cuenta()
+
+        if not datos:
+
+            return (
+                "❌ No se pudo obtener "
+                "el saldo."
+            )
+
+        beneficio = datos[
+            "beneficio_dia"
+        ]
+
+        emoji = (
+            "🟢"
+            if beneficio >= 0
+            else "🔴"
+        )
+
+        return (
+            "💰 SALDO DE LA CUENTA\n\n"
+            f"Capital total: "
+            f"${datos['equity']:,.2f}\n"
+            f"Disponible: "
+            f"${datos['cash']:,.2f}\n"
+            f"Buying Power: "
+            f"${datos['buying_power']:,.2f}\n\n"
+            "📊 RESULTADO DEL DÍA\n"
+            f"{emoji} "
+            f"${beneficio:+,.2f}\n\n"
+            "📈 POSICIONES\n"
+            f"{datos['numero_posiciones']}"
+        )
+
+    # --------------------------------------------------------
+    # /posiciones
+    # --------------------------------------------------------
+
+    if comando == "/posiciones":
+
+        posiciones = (
+            broker.obtener_posiciones_telegram()
+        )
+
+        if not posiciones:
+
+            return (
+                "📭 No hay posiciones abiertas."
+            )
+
+        mensaje = (
+            "📊 POSICIONES ABIERTAS\n\n"
+        )
+
+        for posicion in posiciones:
+
+            emoji = (
+                "🟢"
+                if posicion["beneficio"] >= 0
+                else "🔴"
+            )
+
+            mensaje += (
+                f"{emoji} "
+                f"{posicion['simbolo']}\n"
+                f"Cantidad: "
+                f"{posicion['cantidad']}\n"
+                f"Entrada: "
+                f"${posicion['entrada']:.2f}\n"
+                f"Actual: "
+                f"${posicion['actual']:.2f}\n"
+                f"P/L: "
+                f"${posicion['beneficio']:+,.2f} "
+                f"("
+                f"{posicion['beneficio_pct']:+.2f}%"
+                f")\n\n"
+            )
+
+        return mensaje
+
+    # --------------------------------------------------------
+    # /estado
+    # --------------------------------------------------------
+
+    if comando == "/estado":
+
+        datos = broker.obtener_resumen_cuenta()
+
+        if not datos:
+
+            return (
+                "❌ No se pudo obtener "
+                "el estado."
+            )
+
+        beneficio = datos[
+            "beneficio_dia"
+        ]
+
+        emoji = (
+            "🟢"
+            if beneficio >= 0
+            else "🔴"
+        )
+
+        return (
+            "📊 ESTADO DEL BOT\n\n"
+            f"{emoji} Resultado del día: "
+            f"${beneficio:+,.2f}\n"
+            f"💰 Equity: "
+            f"${datos['equity']:,.2f}\n"
+            f"📈 Posiciones: "
+            f"{datos['numero_posiciones']}\n"
+            f"🤖 {config.BOT_NOMBRE}"
+        )
+
+    # --------------------------------------------------------
+    # /start y /help
+    # --------------------------------------------------------
+
+    if comando in (
+        "/start",
+        "/help",
+    ):
+
+        return (
+            "🤖 COMANDOS DISPONIBLES\n\n"
+            "/saldo — saldo y resultado del día\n"
+            "/posiciones — posiciones abiertas\n"
+            "/estado — estado general del bot"
+        )
+
+    # --------------------------------------------------------
+    # COMANDO DESCONOCIDO
+    # --------------------------------------------------------
+
+    return (
+        "❓ Comando no reconocido.\n\n"
+        "Usa /help para ver los comandos."
+    )
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
+    # --------------------------------------------------------
+    # VALIDAR CONFIGURACIÓN
+    # --------------------------------------------------------
 
     config.validar()
 
@@ -1305,9 +1172,9 @@ def main():
         f"{config.CRYPTO_CHECK_INTERVAL_MINUTES} min)"
     )
 
-    # ========================================================
-    # TELEGRAM — INICIO
-    # ========================================================
+    # --------------------------------------------------------
+    # NOTIFICACIÓN DE INICIO
+    # --------------------------------------------------------
 
     try:
 
@@ -1327,9 +1194,9 @@ def main():
             f"notificación de inicio: {e}"
         )
 
-    # ========================================================
-    # COMANDOS TELEGRAM
-    # ========================================================
+    # --------------------------------------------------------
+    # INICIAR COMANDOS TELEGRAM
+    # --------------------------------------------------------
 
     try:
 
@@ -1337,32 +1204,24 @@ def main():
             procesar_comando_telegram
         )
 
-        log.info(
-            "[Telegram] Monitor de comandos iniciado."
-        )
-
     except Exception as e:
 
         log.warning(
-            f"No se pudo iniciar "
-            f"el monitor de comandos Telegram: {e}"
+            "No se pudo iniciar el monitor "
+            f"de comandos Telegram: {e}"
         )
 
-    # ========================================================
-    # RECUPERACIÓN
-    # ========================================================
+    # --------------------------------------------------------
+    # RECUPERAR PROTECCIONES
+    # --------------------------------------------------------
 
     recuperar_protecciones()
 
-    # ========================================================
-    # HILOS
-    # ========================================================
+    # --------------------------------------------------------
+    # CREAR HILOS
+    # --------------------------------------------------------
 
     hilos = []
-
-    # --------------------------------------------------------
-    # EJECUCIONES
-    # --------------------------------------------------------
 
     hilos.append(
         threading.Thread(
@@ -1371,10 +1230,6 @@ def main():
             name="MonitorEjecuciones",
         )
     )
-
-    # --------------------------------------------------------
-    # ACCIONES
-    # --------------------------------------------------------
 
     if config.TICKERS:
 
@@ -1385,10 +1240,6 @@ def main():
                 name="LoopAcciones",
             )
         )
-
-    # --------------------------------------------------------
-    # CRIPTO
-    # --------------------------------------------------------
 
     if config.CRYPTO_TICKERS:
 
@@ -1410,16 +1261,17 @@ def main():
 
         return
 
-    # ========================================================
-    # ARRANCAR
-    # ========================================================
+    # --------------------------------------------------------
+    # INICIAR HILOS
+    # --------------------------------------------------------
 
     for hilo in hilos:
 
         hilo.start()
 
         log.info(
-            f"Hilo iniciado: {hilo.name}"
+            f"Hilo iniciado: "
+            f"{hilo.name}"
         )
 
     log.info(
@@ -1427,9 +1279,9 @@ def main():
         "han sido iniciados correctamente."
     )
 
-    # ========================================================
-    # MANTENER PROCESO VIVO
-    # ========================================================
+    # --------------------------------------------------------
+    # MANTENER BOT ACTIVO
+    # --------------------------------------------------------
 
     while True:
 
