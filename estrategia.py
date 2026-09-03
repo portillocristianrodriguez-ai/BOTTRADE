@@ -1,27 +1,4 @@
-"""
-Estrategia: cruce de EMA + confirmación RSI + MACD, con filtros que
-reducen señales falsas:
-
-- Filtro de tendencia macro (EMA_TENDENCIA, 200 por defecto): solo compra
-  si el precio está por encima de esta media. Evita comprar "rebotes"
-  dentro de una tendencia bajista de fondo.
-- Filtro de volumen: solo entra si el volumen actual iguala o supera su
-  media reciente. Un cruce con volumen bajo suele ser ruido.
-- Filtro de volatilidad (ATR): evita operar cuando el mercado está
-  demasiado plano, condición en la que los cruces de EMA generan muchas
-  señales falsas.
-
-- COMPRAR: EMA rápida cruza por encima de la lenta (o RSI en sobreventa +
-  MACD positivo), con tendencia macro alcista, volumen suficiente y
-  volatilidad suficiente.
-- VENDER: EMA rápida cruza por debajo de la lenta, o RSI entra en
-  sobrecompra.
-- ESPERAR: cualquier otro caso, incluido cuando algún filtro no se cumple.
-
-Ningún indicador predice el futuro con certeza — esto identifica
-probabilidades razonables, no garantías.
-"""
-
+cat > ~/Desktop/bottrade-backtest/estrategia.py << 'PYEOF'
 import pandas as pd
 import ta
 import config
@@ -45,22 +22,14 @@ def calcular_indicadores(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filtros_ok(actual: pd.Series) -> bool:
-    """Devuelve False si el contexto de mercado no es adecuado para operar,
-    sin importar lo que digan las señales de cruce/RSI/MACD."""
-    # Volatilidad mínima: si el ATR es muy pequeño respecto al precio, el
-    # mercado está demasiado plano y los cruces suelen ser ruido.
     if pd.isna(actual.get("atr")) or actual["close"] <= 0:
         return False
     atr_pct = actual["atr"] / actual["close"]
     if atr_pct < config.ATR_MIN_PCT:
         return False
-
-    # Volumen: si hay dato de volumen disponible, exige que esté por encima
-    # de su media reciente (con margen configurable).
     if "volumen_media" in actual and not pd.isna(actual.get("volumen_media")):
         if actual["volume"] < actual["volumen_media"] * config.VOLUMEN_MIN_MULTIPLICADOR:
             return False
-
     return True
 
 
@@ -87,8 +56,6 @@ def generar_senal(df: pd.DataFrame) -> str:
     )
     macd_positivo = actual["macd"] > actual["macd_signal"]
 
-    # Las ventas no dependen de los filtros de contexto: si toca salir,
-    # se sale igual (el filtro solo protege las entradas de baja calidad).
     if cruce_bajista or actual["rsi"] > config.RSI_SOBRECOMPRA:
         return "VENDER"
 
@@ -101,3 +68,6 @@ def generar_senal(df: pd.DataFrame) -> str:
         return "COMPRAR"
 
     return "ESPERAR"
+PYEOF
+echo "estrategia.py creado correctamente"
+python3 diagnostico_senales.py
