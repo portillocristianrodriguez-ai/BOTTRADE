@@ -73,9 +73,13 @@ cliente_datos_crypto = CryptoHistoricalDataClient(
 # UTILIDADES
 # ============================================================
 
-def es_cripto(ticker: str) -> bool:
+def es_cripto(
+    ticker: str,
+) -> bool:
 
-    ticker = str(ticker).upper().strip()
+    ticker = str(
+        ticker
+    ).upper().strip()
 
     if "/" in ticker:
         return True
@@ -100,7 +104,16 @@ def normalizar_ticker_crypto(
     ticker: str,
 ) -> str:
 
-    ticker = str(ticker).upper().strip()
+    """
+    Formato utilizado para datos de mercado.
+
+    BTCUSD -> BTC/USD
+    BTC/USD -> BTC/USD
+    """
+
+    ticker = str(
+        ticker
+    ).upper().strip()
 
     if "/" in ticker:
         return ticker
@@ -111,6 +124,32 @@ def normalizar_ticker_crypto(
 
         if base:
             return f"{base}/USD"
+
+    return ticker
+
+
+def ticker_comparacion(
+    ticker: str,
+) -> str:
+
+    """
+    Normaliza símbolos para comparar posiciones
+    y órdenes independientemente de si Alpaca
+    devuelve BTC/USD o BTCUSD.
+    """
+
+    ticker = str(
+        ticker
+    ).upper().strip()
+
+    if es_cripto(ticker):
+
+        return (
+            ticker
+            .replace("/", "")
+            .replace("-", "")
+            .replace(" ", "")
+        )
 
     return ticker
 
@@ -323,11 +362,74 @@ def obtener_posicion(
 
     try:
 
-        return cliente_trading.get_open_position(
-            ticker
+        simbolo_buscado = (
+            ticker_comparacion(
+                ticker
+            )
         )
 
-    except Exception:
+        # ====================================================
+        # PRIMERO: endpoint directo
+        # ====================================================
+
+        try:
+
+            simbolo_directo = (
+                normalizar_ticker_crypto(
+                    ticker
+                )
+                if es_cripto(ticker)
+                else ticker
+            )
+
+            posicion = (
+                cliente_trading
+                .get_open_position(
+                    simbolo_directo
+                )
+            )
+
+            if posicion is not None:
+
+                return posicion
+
+        except Exception:
+
+            pass
+
+        # ====================================================
+        # SEGUNDO: buscar entre todas las posiciones
+        # ====================================================
+
+        posiciones = (
+            cliente_trading
+            .get_all_positions()
+        )
+
+        for posicion in posiciones:
+
+            simbolo_posicion = getattr(
+                posicion,
+                "symbol",
+                "",
+            )
+
+            if (
+                ticker_comparacion(
+                    simbolo_posicion
+                )
+                == simbolo_buscado
+            ):
+
+                return posicion
+
+        return None
+
+    except Exception as e:
+
+        log.error(
+            f"{ticker}: error obteniendo posición: {e}"
+        )
 
         return None
 
@@ -352,10 +454,11 @@ def tiene_posicion_abierta(
     ticker: str,
 ) -> bool:
 
-    return (
-        obtener_posicion(ticker)
-        is not None
+    posicion = obtener_posicion(
+        ticker
     )
+
+    return posicion is not None
 
 
 def contar_posiciones_abiertas() -> int:
@@ -410,44 +513,30 @@ def obtener_ordenes_ticker(
 
     try:
 
-        ordenes = obtener_ordenes_abiertas()
-
-        ticker_busqueda = str(
-            ticker
-        ).upper().strip()
+        ordenes = (
+            obtener_ordenes_abiertas()
+        )
 
         ticker_normalizado = (
-            normalizar_ticker_crypto(
-                ticker_busqueda
+            ticker_comparacion(
+                ticker
             )
-            if es_cripto(ticker_busqueda)
-            else ticker_busqueda
         )
 
         resultado = []
 
         for orden in ordenes:
 
-            simbolo_orden = str(
-                getattr(
-                    orden,
-                    "symbol",
-                    "",
-                )
-            ).upper().strip()
-
-            simbolo_orden_normalizado = (
-                normalizar_ticker_crypto(
-                    simbolo_orden
-                )
-                if es_cripto(
-                    simbolo_orden
-                )
-                else simbolo_orden
+            simbolo_orden = getattr(
+                orden,
+                "symbol",
+                "",
             )
 
             if (
-                simbolo_orden_normalizado
+                ticker_comparacion(
+                    simbolo_orden
+                )
                 == ticker_normalizado
             ):
 
@@ -527,19 +616,19 @@ def _analizar_orden_proteccion(
         stop_price = getattr(
             orden,
             "stop_price",
-            None
+            None,
         )
 
         stop_loss = getattr(
             orden,
             "stop_loss",
-            None
+            None,
         )
 
         take_profit = getattr(
             orden,
             "take_profit",
-            None
+            None,
         )
 
         tiene_sl = (
@@ -559,7 +648,7 @@ def _analizar_orden_proteccion(
         legs = getattr(
             orden,
             "legs",
-            None
+            None,
         )
 
         if legs:
@@ -589,13 +678,13 @@ def _analizar_orden_proteccion(
                 leg_stop_price = getattr(
                     leg,
                     "stop_price",
-                    None
+                    None,
                 )
 
                 leg_limit_price = getattr(
                     leg,
                     "limit_price",
-                    None
+                    None,
                 )
 
                 if (
@@ -640,8 +729,10 @@ def analizar_proteccion(
 
     try:
 
-        ordenes = obtener_ordenes_ticker(
-            ticker
+        ordenes = (
+            obtener_ordenes_ticker(
+                ticker
+            )
         )
 
         for orden in ordenes:
@@ -718,8 +809,10 @@ def tiene_proteccion(
     ticker: str,
 ) -> bool:
 
-    resultado = analizar_proteccion(
-        ticker
+    resultado = (
+        analizar_proteccion(
+            ticker
+        )
     )
 
     return bool(
@@ -739,8 +832,10 @@ def cancelar_protecciones(
 
     try:
 
-        ordenes = obtener_ordenes_ticker(
-            ticker
+        ordenes = (
+            obtener_ordenes_ticker(
+                ticker
+            )
         )
 
         protecciones = []
@@ -849,12 +944,10 @@ def proteger_posicion(
 
             return None
 
-        # ====================================================
-        # COMPROBAR PROTECCIÓN
-        # ====================================================
-
-        analisis = analizar_proteccion(
-            ticker
+        analisis = (
+            analizar_proteccion(
+                ticker
+            )
         )
 
         if analisis[
@@ -867,10 +960,6 @@ def proteger_posicion(
             )
 
             return None
-
-        # ====================================================
-        # SI ESTÁ INCOMPLETA, RECONSTRUIR
-        # ====================================================
 
         if (
             analisis["tiene_sl"]
@@ -892,10 +981,6 @@ def proteger_posicion(
                 )
 
                 return None
-
-        # ====================================================
-        # POSICIÓN
-        # ====================================================
 
         cantidad = float(
             posicion.qty
@@ -1234,6 +1319,11 @@ def vender(
 
         if posicion is None:
 
+            log.warning(
+                f"{ticker}: no se encontró "
+                f"posición para vender."
+            )
+
             return None
 
         cantidad = float(
@@ -1399,13 +1489,19 @@ def precio_actual_posicion(
 
 _ordenes_notificadas = set()
 
+# Momento exacto en el que comienza el monitor.
+# Se utiliza para distinguir órdenes antiguas
+# de ejecuciones nuevas.
+_inicio_monitor_ejecuciones = None
+
 
 def obtener_ordenes_ejecutadas():
 
     try:
 
         request = GetOrdersRequest(
-            status=QueryOrderStatus.CLOSED
+            status=QueryOrderStatus.CLOSED,
+            limit=500,
         )
 
         ordenes = (
@@ -1413,10 +1509,6 @@ def obtener_ordenes_ejecutadas():
                 filter=request
             )
         )
-
-        # ====================================================
-        # DIAGNÓSTICO
-        # ====================================================
 
         log.info(
             f"[ejecuciones] "
@@ -1436,39 +1528,138 @@ def obtener_ordenes_ejecutadas():
         return []
 
 
+def _obtener_fecha_ejecucion(
+    orden,
+):
+
+    """
+    Obtiene la fecha real de ejecución.
+
+    Prioridad:
+        filled_at
+        submitted_at
+        created_at
+    """
+
+    for campo in (
+        "filled_at",
+        "submitted_at",
+        "created_at",
+    ):
+
+        valor = getattr(
+            orden,
+            campo,
+            None,
+        )
+
+        if valor is None:
+
+            continue
+
+        try:
+
+            if isinstance(
+                valor,
+                datetime,
+            ):
+
+                fecha = valor
+
+            else:
+
+                fecha = datetime.fromisoformat(
+                    str(valor).replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+
+            if fecha.tzinfo is None:
+
+                fecha = fecha.replace(
+                    tzinfo=timezone.utc
+                )
+
+            return fecha.astimezone(
+                timezone.utc
+            )
+
+        except Exception:
+
+            continue
+
+    return None
+
+
 def inicializar_monitor_ejecuciones():
 
     global _ordenes_notificadas
+    global _inicio_monitor_ejecuciones
 
     try:
+
+        # ====================================================
+        # MOMENTO DE ARRANQUE
+        # ====================================================
+
+        _inicio_monitor_ejecuciones = (
+            datetime.now(
+                timezone.utc
+            )
+        )
 
         ordenes = (
             obtener_ordenes_ejecutadas()
         )
 
+        antiguas = 0
+
         for orden in ordenes:
 
-            status = str(
+            order_id = str(
                 getattr(
                     orden,
-                    "status",
+                    "id",
                     "",
                 )
-            ).lower()
+            )
 
-            if "filled" in status:
+            if not order_id:
+
+                continue
+
+            fecha_ejecucion = (
+                _obtener_fecha_ejecucion(
+                    orden
+                )
+            )
+
+            # Toda orden que ya existía antes
+            # de iniciar el monitor se ignora.
+            if (
+                fecha_ejecucion is None
+                or fecha_ejecucion
+                <= _inicio_monitor_ejecuciones
+            ):
 
                 _ordenes_notificadas.add(
-                    str(
-                        orden.id
-                    )
+                    order_id
                 )
+
+                antiguas += 1
 
         log.info(
             f"[ejecuciones] "
             f"Monitor inicializado. "
-            f"{len(_ordenes_notificadas)} "
-            f"órdenes antiguas ignoradas."
+            f"{antiguas} órdenes antiguas "
+            f"ignoradas."
+        )
+
+        log.info(
+            f"[ejecuciones] "
+            f"Vigilando ejecuciones posteriores a "
+            f"{_inicio_monitor_ejecuciones.isoformat()}"
         )
 
     except Exception as e:
@@ -1482,10 +1673,22 @@ def inicializar_monitor_ejecuciones():
 def detectar_ejecuciones():
 
     global _ordenes_notificadas
+    global _inicio_monitor_ejecuciones
 
     nuevas = []
 
     try:
+
+        # Seguridad: si el monitor no se inicializó,
+        # no intentamos clasificar órdenes.
+        if _inicio_monitor_ejecuciones is None:
+
+            log.warning(
+                "[ejecuciones] "
+                "Monitor todavía no inicializado."
+            )
+
+            return nuevas
 
         ordenes = (
             obtener_ordenes_ejecutadas()
@@ -1494,8 +1697,16 @@ def detectar_ejecuciones():
         for orden in ordenes:
 
             order_id = str(
-                orden.id
+                getattr(
+                    orden,
+                    "id",
+                    "",
+                )
             )
+
+            if not order_id:
+
+                continue
 
             if (
                 order_id
@@ -1514,6 +1725,34 @@ def detectar_ejecuciones():
 
             if "filled" not in status:
 
+                # Si está cerrada pero no fue ejecutada,
+                # no nos interesa como compra/venta.
+                _ordenes_notificadas.add(
+                    order_id
+                )
+
+                continue
+
+            # =================================================
+            # FECHA DE EJECUCIÓN
+            # =================================================
+
+            fecha_ejecucion = (
+                _obtener_fecha_ejecucion(
+                    orden
+                )
+            )
+
+            if (
+                fecha_ejecucion is None
+                or fecha_ejecucion
+                <= _inicio_monitor_ejecuciones
+            ):
+
+                _ordenes_notificadas.add(
+                    order_id
+                )
+
                 continue
 
             # =================================================
@@ -1527,7 +1766,7 @@ def detectar_ejecuciones():
             ticker = getattr(
                 orden,
                 "symbol",
-                "?"
+                "?",
             )
 
             ticker = (
@@ -1542,7 +1781,7 @@ def detectar_ejecuciones():
                 getattr(
                     orden,
                     "side",
-                    ""
+                    "",
                 )
             ).lower()
 
@@ -1552,14 +1791,14 @@ def detectar_ejecuciones():
                 getattr(
                     orden,
                     "qty",
-                    "?"
-                )
+                    "?",
+                ),
             )
 
             precio = getattr(
                 orden,
                 "filled_avg_price",
-                None
+                None,
             )
 
             es_compra = (
@@ -1588,19 +1827,28 @@ def detectar_ejecuciones():
                 else "📈 ACCIÓN | 15M"
             )
 
-            # =================================================
-            # LOG EXPLÍCITO
-            # =================================================
-
             log.info(
                 f"[ejecuciones] "
                 f"NUEVA EJECUCIÓN DETECTADA: "
                 f"{ticker} | "
                 f"{accion} | "
-                f"ID={order_id}"
+                f"ID={order_id} | "
+                f"Hora={fecha_ejecucion.isoformat()}"
             )
 
             if precio is not None:
+
+                try:
+
+                    precio_formateado = (
+                        f"${float(precio):.2f}"
+                    )
+
+                except Exception:
+
+                    precio_formateado = (
+                        str(precio)
+                    )
 
                 mensaje = (
                     f"{emoji} {accion} EJECUTADA\n"
@@ -1608,7 +1856,7 @@ def detectar_ejecuciones():
                     f"{ticker}\n"
                     f"Cantidad: {qty}\n"
                     f"Precio: "
-                    f"${float(precio):.2f}"
+                    f"{precio_formateado}"
                 )
 
             else:
