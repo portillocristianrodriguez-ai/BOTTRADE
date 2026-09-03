@@ -5,6 +5,7 @@ Todo lo que toca la API de Alpaca:
 
 - Obtener datos de mercado
 - Consultar posiciones
+- Consultar cuenta
 - Ejecutar compras/ventas
 - Gestionar protección SL/TP
 - Controlar tamaño de posición
@@ -482,6 +483,200 @@ def contar_posiciones_abiertas() -> int:
 
 
 # ============================================================
+# INFORMACIÓN DE CUENTA PARA TELEGRAM
+# ============================================================
+
+def obtener_resumen_cuenta():
+
+    """
+    Obtiene información general de la cuenta
+    para los comandos de Telegram.
+
+    beneficio_dia:
+        Equity actual - equity del cierre anterior.
+
+    beneficio_posiciones:
+        Beneficio/pérdida no realizado de las
+        posiciones actualmente abiertas.
+    """
+
+    try:
+
+        cuenta = (
+            cliente_trading
+            .get_account()
+        )
+
+        equity = float(
+            getattr(
+                cuenta,
+                "equity",
+                0,
+            )
+            or 0
+        )
+
+        cash = float(
+            getattr(
+                cuenta,
+                "cash",
+                0,
+            )
+            or 0
+        )
+
+        buying_power = float(
+            getattr(
+                cuenta,
+                "buying_power",
+                0,
+            )
+            or 0
+        )
+
+        last_equity = float(
+            getattr(
+                cuenta,
+                "last_equity",
+                0,
+            )
+            or 0
+        )
+
+        beneficio_dia = (
+            equity
+            - last_equity
+        )
+
+        posiciones = (
+            cliente_trading
+            .get_all_positions()
+        )
+
+        beneficio_posiciones = 0.0
+
+        for posicion in posiciones:
+
+            beneficio_posiciones += float(
+                getattr(
+                    posicion,
+                    "unrealized_pl",
+                    0,
+                )
+                or 0
+            )
+
+        return {
+            "equity": equity,
+            "cash": cash,
+            "buying_power": buying_power,
+            "beneficio_dia": beneficio_dia,
+            "beneficio_posiciones": beneficio_posiciones,
+            "numero_posiciones": len(posiciones),
+        }
+
+    except Exception as e:
+
+        log.error(
+            f"[cuenta] Error obteniendo "
+            f"resumen: {e}"
+        )
+
+        return None
+
+
+def obtener_posiciones_telegram():
+
+    """
+    Devuelve información detallada de las posiciones
+    abiertas para mostrarla en Telegram.
+    """
+
+    try:
+
+        posiciones = (
+            cliente_trading
+            .get_all_positions()
+        )
+
+        resultado = []
+
+        for posicion in posiciones:
+
+            simbolo = str(
+                getattr(
+                    posicion,
+                    "symbol",
+                    "?",
+                )
+            )
+
+            cantidad = getattr(
+                posicion,
+                "qty",
+                "?",
+            )
+
+            precio_entrada = float(
+                getattr(
+                    posicion,
+                    "avg_entry_price",
+                    0,
+                )
+                or 0
+            )
+
+            precio_actual = float(
+                getattr(
+                    posicion,
+                    "current_price",
+                    0,
+                )
+                or 0
+            )
+
+            beneficio = float(
+                getattr(
+                    posicion,
+                    "unrealized_pl",
+                    0,
+                )
+                or 0
+            )
+
+            beneficio_pct = float(
+                getattr(
+                    posicion,
+                    "unrealized_plpc",
+                    0,
+                )
+                or 0
+            ) * 100
+
+            resultado.append(
+                {
+                    "simbolo": simbolo,
+                    "cantidad": cantidad,
+                    "entrada": precio_entrada,
+                    "actual": precio_actual,
+                    "beneficio": beneficio,
+                    "beneficio_pct": beneficio_pct,
+                }
+            )
+
+        return resultado
+
+    except Exception as e:
+
+        log.error(
+            f"[cuenta] Error obteniendo "
+            f"posiciones para Telegram: {e}"
+        )
+
+        return []
+
+
+# ============================================================
 # ÓRDENES ABIERTAS
 # ============================================================
 
@@ -767,15 +962,6 @@ def analizar_proteccion(
                 resultado[
                     "tiene_tp"
                 ] = True
-
-            log.debug(
-                f"{ticker}: "
-                f"orden={getattr(orden, 'id', '?')} "
-                f"type={getattr(orden, 'type', '?')} "
-                f"class={getattr(orden, 'order_class', '?')} "
-                f"SL={tiene_sl} "
-                f"TP={tiene_tp}"
-            )
 
         resultado[
             "tiene_proteccion"
@@ -1489,9 +1675,6 @@ def precio_actual_posicion(
 
 _ordenes_notificadas = set()
 
-# Momento exacto en el que comienza el monitor.
-# Se utiliza para distinguir órdenes antiguas
-# de ejecuciones nuevas.
 _inicio_monitor_ejecuciones = None
 
 
@@ -1599,10 +1782,6 @@ def inicializar_monitor_ejecuciones():
 
     try:
 
-        # ====================================================
-        # MOMENTO DE ARRANQUE
-        # ====================================================
-
         _inicio_monitor_ejecuciones = (
             datetime.now(
                 timezone.utc
@@ -1635,8 +1814,6 @@ def inicializar_monitor_ejecuciones():
                 )
             )
 
-            # Toda orden que ya existía antes
-            # de iniciar el monitor se ignora.
             if (
                 fecha_ejecucion is None
                 or fecha_ejecucion
@@ -1679,8 +1856,6 @@ def detectar_ejecuciones():
 
     try:
 
-        # Seguridad: si el monitor no se inicializó,
-        # no intentamos clasificar órdenes.
         if _inicio_monitor_ejecuciones is None:
 
             log.warning(
@@ -1725,17 +1900,11 @@ def detectar_ejecuciones():
 
             if "filled" not in status:
 
-                # Si está cerrada pero no fue ejecutada,
-                # no nos interesa como compra/venta.
                 _ordenes_notificadas.add(
                     order_id
                 )
 
                 continue
-
-            # =================================================
-            # FECHA DE EJECUCIÓN
-            # =================================================
 
             fecha_ejecucion = (
                 _obtener_fecha_ejecucion(
@@ -1754,10 +1923,6 @@ def detectar_ejecuciones():
                 )
 
                 continue
-
-            # =================================================
-            # NUEVA EJECUCIÓN
-            # =================================================
 
             _ordenes_notificadas.add(
                 order_id
@@ -1887,100 +2052,3 @@ def detectar_ejecuciones():
         )
 
     return nuevas
-    # ============================================================
-# COMANDOS TELEGRAM
-# ============================================================
-
-def procesar_comando_telegram(comando):
-
-    if comando == "/saldo":
-
-        datos = broker.obtener_resumen_cuenta()
-
-        if not datos:
-            return "❌ No se pudo obtener el saldo."
-
-        beneficio = datos["beneficio_dia"]
-
-        emoji = "🟢" if beneficio >= 0 else "🔴"
-
-        return (
-            "💰 SALDO DE LA CUENTA\n\n"
-            f"Capital total: ${datos['equity']:,.2f}\n"
-            f"Disponible: ${datos['cash']:,.2f}\n"
-            f"Buying Power: ${datos['buying_power']:,.2f}\n\n"
-            "📊 RESULTADO DEL DÍA\n"
-            f"{emoji} ${beneficio:+,.2f}\n\n"
-            "📈 POSICIONES\n"
-            f"{datos['numero_posiciones']}"
-        )
-
-    if comando == "/posiciones":
-
-        posiciones = broker.obtener_posiciones_telegram()
-
-        if not posiciones:
-            return (
-                "📭 No hay posiciones abiertas."
-            )
-
-        mensaje = "📊 POSICIONES ABIERTAS\n\n"
-
-        for p in posiciones:
-
-            emoji = (
-                "🟢"
-                if p["beneficio"] >= 0
-                else "🔴"
-            )
-
-            mensaje += (
-                f"{emoji} {p['simbolo']}\n"
-                f"Cantidad: {p['cantidad']}\n"
-                f"Entrada: ${p['entrada']:.2f}\n"
-                f"Actual: ${p['actual']:.2f}\n"
-                f"P/L: ${p['beneficio']:+,.2f} "
-                f"({p['beneficio_pct']:+.2f}%)\n\n"
-            )
-
-        return mensaje
-
-    if comando == "/estado":
-
-        datos = broker.obtener_resumen_cuenta()
-
-        if not datos:
-            return "❌ No se pudo obtener el estado."
-
-        beneficio = datos["beneficio_dia"]
-
-        emoji = "🟢" if beneficio >= 0 else "🔴"
-
-        return (
-            "📊 ESTADO DEL BOT\n\n"
-            f"{emoji} Resultado del día: "
-            f"${beneficio:+,.2f}\n"
-            f"💰 Equity: ${datos['equity']:,.2f}\n"
-            f"📈 Posiciones: "
-            f"{datos['numero_posiciones']}\n"
-            f"🤖 {config.BOT_NOMBRE}"
-        )
-
-    if comando == "/start" or comando == "/help":
-
-        return (
-            "🤖 COMANDOS DISPONIBLES\n\n"
-            "/saldo — saldo y resultado del día\n"
-            "/posiciones — posiciones abiertas\n"
-            "/estado — estado general del bot"
-        )
-
-    return (
-        "❓ Comando no reconocido.\n\n"
-        "Usa /help para ver los comandos."
-    )
-
-
-notificaciones.iniciar_comandos(
-    procesar_comando_telegram
-)
