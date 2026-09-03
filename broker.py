@@ -1,5 +1,6 @@
-
 """
+broker.py
+
 Todo lo que toca la API de Alpaca:
 
 - Obtener datos de mercado
@@ -73,16 +74,6 @@ cliente_datos_crypto = CryptoHistoricalDataClient(
 # ============================================================
 
 def es_cripto(ticker: str) -> bool:
-    """
-    Detecta si un ticker es criptomoneda.
-
-    Alpaca puede devolver símbolos cripto como:
-
-        BTC/USD
-        BTCUSD
-
-    Aceptamos ambos formatos.
-    """
 
     ticker = str(ticker).upper().strip()
 
@@ -108,18 +99,6 @@ def es_cripto(ticker: str) -> bool:
 def normalizar_ticker_crypto(
     ticker: str,
 ) -> str:
-    """
-    Convierte símbolos cripto al formato
-    utilizado por los datos de Alpaca.
-
-    Ejemplos:
-
-        BTCUSD  -> BTC/USD
-        ETHUSD  -> ETH/USD
-        SOLUSD  -> SOL/USD
-
-    Si ya contiene '/', no se modifica.
-    """
 
     ticker = str(ticker).upper().strip()
 
@@ -141,9 +120,6 @@ def normalizar_ticker_crypto(
 # ============================================================
 
 def mercado_abierto() -> bool:
-    """
-    Comprueba si el mercado de acciones está abierto.
-    """
 
     try:
 
@@ -498,14 +474,6 @@ def _analizar_orden_proteccion(
     orden,
 ):
 
-    """
-    Devuelve:
-
-        (tiene_sl, tiene_tp)
-
-    Una OCO válida contiene SL + TP.
-    """
-
     try:
 
         side = str(
@@ -853,7 +821,6 @@ def proteger_posicion(
 
     try:
 
-        # Las criptos utilizan protección manual.
         if es_cripto(ticker):
 
             return None
@@ -1089,7 +1056,6 @@ def calcular_tamano_posicion(
             cuenta.buying_power
         )
 
-        # Riesgo = 2% por operación
         riesgo_dolares = (
             equity
             * config.RISK_PER_TRADE_PCT
@@ -1200,8 +1166,6 @@ def comprar(
 
             return None
 
-        # Para enviar la orden usamos el ticker
-        # configurado por el bot.
         simbolo_orden = (
             normalizar_ticker_crypto(
                 ticker
@@ -1276,8 +1240,6 @@ def vender(
             posicion.qty
         )
 
-        # Antes de vender una acción,
-        # cancelar sus protecciones.
         if not es_cripto(ticker):
 
             if not cancelar_protecciones(
@@ -1446,9 +1408,23 @@ def obtener_ordenes_ejecutadas():
             status=QueryOrderStatus.CLOSED
         )
 
-        return cliente_trading.get_orders(
-            filter=request
+        ordenes = (
+            cliente_trading.get_orders(
+                filter=request
+            )
         )
+
+        # ====================================================
+        # DIAGNÓSTICO
+        # ====================================================
+
+        log.info(
+            f"[ejecuciones] "
+            f"Órdenes cerradas encontradas: "
+            f"{len(ordenes)}"
+        )
+
+        return ordenes
 
     except Exception as e:
 
@@ -1540,6 +1516,10 @@ def detectar_ejecuciones():
 
                 continue
 
+            # =================================================
+            # NUEVA EJECUCIÓN
+            # =================================================
+
             _ordenes_notificadas.add(
                 order_id
             )
@@ -1550,8 +1530,6 @@ def detectar_ejecuciones():
                 "?"
             )
 
-            # Normalizar símbolo de cripto
-            # para mensajes y lógica interna.
             ticker = (
                 normalizar_ticker_crypto(
                     ticker
@@ -1608,6 +1586,18 @@ def detectar_ejecuciones():
                 "₿ CRIPTO | 5M"
                 if es_cripto(ticker)
                 else "📈 ACCIÓN | 15M"
+            )
+
+            # =================================================
+            # LOG EXPLÍCITO
+            # =================================================
+
+            log.info(
+                f"[ejecuciones] "
+                f"NUEVA EJECUCIÓN DETECTADA: "
+                f"{ticker} | "
+                f"{accion} | "
+                f"ID={order_id}"
             )
 
             if precio is not None:
