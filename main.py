@@ -6,6 +6,7 @@ Gestiona:
 - Posiciones de acciones existentes: comprueba y crea protección
   automáticamente si falta SL/TP.
 - Cripto: gestión manual de stop-loss + trailing stop.
+- Órdenes ejecutadas: monitorización y avisos por Telegram.
 """
 
 import time
@@ -26,18 +27,30 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# Máximo alcanzado por cada posición cripto desde que se abrió.
+# =========================================================
+# MÁXIMOS DE CRIPTO
+# =========================================================
+
 _maximos_cripto = {}
 
+
+# =========================================================
+# REVISAR TICKER
+# =========================================================
 
 def revisar_ticker(ticker: str):
     """Revisa un ticker y gestiona su posición."""
 
     try:
+
         df = broker.obtener_datos(ticker)
 
         if df.empty:
-            log.warning(f"{ticker}: sin datos, se omite.")
+
+            log.warning(
+                f"{ticker}: sin datos, se omite."
+            )
+
             return
 
         df = estrategia.calcular_indicadores(df)
@@ -46,7 +59,9 @@ def revisar_ticker(ticker: str):
 
         actual = df.iloc[-1]
 
-        precio_actual = float(actual["close"])
+        precio_actual = float(
+            actual["close"]
+        )
 
         atr_actual = (
             float(actual["atr"])
@@ -54,7 +69,11 @@ def revisar_ticker(ticker: str):
             else None
         )
 
-        posicion_abierta = broker.tiene_posicion_abierta(ticker)
+        posicion_abierta = (
+            broker.tiene_posicion_abierta(
+                ticker
+            )
+        )
 
         log.info(
             f"{ticker}: "
@@ -72,46 +91,64 @@ def revisar_ticker(ticker: str):
             and not broker.es_cripto(ticker)
             and atr_actual is not None
         ):
+
             try:
-                mensaje_proteccion = broker.proteger_posicion(
-                    ticker,
-                    atr_actual,
+
+                mensaje_proteccion = (
+                    broker.proteger_posicion(
+                        ticker,
+                        atr_actual,
+                    )
                 )
 
                 if mensaje_proteccion:
+
                     notificaciones.notificar(
                         mensaje_proteccion
                     )
 
             except Exception as e:
+
                 log.error(
-                    f"{ticker}: error comprobando protección: {e}"
+                    f"{ticker}: error comprobando "
+                    f"protección: {e}"
                 )
 
         # =====================================================
         # CRIPTO
         # =====================================================
 
-        if posicion_abierta and broker.es_cripto(ticker):
+        if (
+            posicion_abierta
+            and broker.es_cripto(ticker)
+        ):
 
             # -------------------------------------------------
             # STOP LOSS MANUAL
             # -------------------------------------------------
 
-            perdida_pct = broker.perdida_pct_no_realizada(
-                ticker
+            perdida_pct = (
+                broker.perdida_pct_no_realizada(
+                    ticker
+                )
             )
 
             if (
                 perdida_pct is not None
-                and perdida_pct <= -config.STOP_LOSS_PCT
+                and perdida_pct
+                <= -config.STOP_LOSS_PCT
             ):
+
                 log.warning(
-                    f"{ticker}: stop-loss manual disparado "
-                    f"({perdida_pct:.2%}). Vendiendo."
+                    f"{ticker}: stop-loss manual "
+                    f"disparado "
+                    f"({perdida_pct:.2%}). "
+                    f"Vendiendo."
                 )
 
-                mensaje = broker.vender(ticker)
+                mensaje = broker.vender(
+                    ticker
+                )
 
                 _maximos_cripto.pop(
                     ticker,
@@ -119,10 +156,12 @@ def revisar_ticker(ticker: str):
                 )
 
                 if mensaje:
+
                     notificaciones.notificar(
                         f"🛑 STOP-LOSS manual — "
                         f"{mensaje} "
-                        f"(pérdida: {perdida_pct:.2%})"
+                        f"(pérdida: "
+                        f"{perdida_pct:.2%})"
                     )
 
                 return
@@ -131,19 +170,24 @@ def revisar_ticker(ticker: str):
             # TRAILING STOP MANUAL
             # -------------------------------------------------
 
-            info_posicion = broker.precio_actual_posicion(
-                ticker
+            info_posicion = (
+                broker.precio_actual_posicion(
+                    ticker
+                )
             )
 
             if info_posicion is not None:
 
-                precio_entrada, precio_actual_pos = (
-                    info_posicion
-                )
-
-                maximo_previo = _maximos_cripto.get(
-                    ticker,
+                (
                     precio_entrada,
+                    precio_actual_pos,
+                ) = info_posicion
+
+                maximo_previo = (
+                    _maximos_cripto.get(
+                        ticker,
+                        precio_entrada,
+                    )
                 )
 
                 nuevo_maximo = max(
@@ -151,10 +195,15 @@ def revisar_ticker(ticker: str):
                     precio_actual_pos,
                 )
 
-                _maximos_cripto[ticker] = nuevo_maximo
+                _maximos_cripto[ticker] = (
+                    nuevo_maximo
+                )
 
                 retroceso = (
-                    (nuevo_maximo - precio_actual_pos)
+                    (
+                        nuevo_maximo
+                        - precio_actual_pos
+                    )
                     / nuevo_maximo
                     if nuevo_maximo > 0
                     else 0
@@ -164,14 +213,20 @@ def revisar_ticker(ticker: str):
                     retroceso
                     >= config.TRAILING_STOP_PCT
                 ):
+
                     log.warning(
-                        f"{ticker}: trailing stop disparado "
-                        f"(retroceso {retroceso:.2%} "
-                        f"desde ${nuevo_maximo:.2f}). "
+                        f"{ticker}: trailing stop "
+                        f"disparado "
+                        f"(retroceso "
+                        f"{retroceso:.2%} "
+                        f"desde "
+                        f"${nuevo_maximo:.2f}). "
                         f"Vendiendo."
                     )
 
-                    mensaje = broker.vender(ticker)
+                    mensaje = broker.vender(
+                        ticker
+                    )
 
                     _maximos_cripto.pop(
                         ticker,
@@ -179,6 +234,7 @@ def revisar_ticker(ticker: str):
                     )
 
                     if mensaje:
+
                         notificaciones.notificar(
                             f"📉 TRAILING STOP — "
                             f"{mensaje} "
@@ -198,20 +254,24 @@ def revisar_ticker(ticker: str):
         ):
 
             if atr_actual is None:
+
                 log.warning(
                     f"{ticker}: ATR no disponible, "
                     f"se omite compra."
                 )
+
                 return
 
             if (
                 broker.contar_posiciones_abiertas()
                 >= config.MAX_POSICIONES_ABIERTAS
             ):
+
                 log.info(
                     "Máximo de posiciones abiertas "
                     "alcanzado, se omite compra."
                 )
+
                 return
 
             mensaje = broker.comprar(
@@ -221,11 +281,13 @@ def revisar_ticker(ticker: str):
             )
 
             if mensaje:
+
                 notificaciones.notificar(
                     mensaje
                 )
 
                 if broker.es_cripto(ticker):
+
                     _maximos_cripto[ticker] = (
                         precio_actual
                     )
@@ -249,15 +311,22 @@ def revisar_ticker(ticker: str):
             )
 
             if mensaje:
+
                 notificaciones.notificar(
                     mensaje
                 )
 
     except Exception as e:
+
         log.error(
-            f"{ticker}: error general en revisar_ticker: {e}"
+            f"{ticker}: error general en "
+            f"revisar_ticker: {e}"
         )
 
+
+# =========================================================
+# LOOP ACCIONES
+# =========================================================
 
 def loop_acciones():
 
@@ -273,11 +342,16 @@ def loop_acciones():
                 for ticker in config.TICKERS:
 
                     try:
-                        revisar_ticker(ticker)
+
+                        revisar_ticker(
+                            ticker
+                        )
 
                     except Exception as e:
+
                         log.error(
-                            f"[acciones] Error procesando "
+                            f"[acciones] Error "
+                            f"procesando "
                             f"{ticker}: {e}"
                         )
 
@@ -295,16 +369,77 @@ def loop_acciones():
             )
 
             try:
+
                 notificaciones.notificar(
-                    f"⚠️ Error en el loop de acciones: {e}"
+                    f"⚠️ Error en el loop "
+                    f"de acciones: {e}"
                 )
+
             except Exception:
+
                 pass
 
         time.sleep(
-            60 * config.CHECK_INTERVAL_MINUTES
+            60
+            * config.CHECK_INTERVAL_MINUTES
         )
 
+
+# =========================================================
+# MONITOR DE EJECUCIONES
+# =========================================================
+
+def loop_ejecuciones():
+
+    log.info(
+        "[ejecuciones] Monitor de órdenes iniciado."
+    )
+
+    while True:
+
+        try:
+
+            mensajes = (
+                broker.detectar_ejecuciones()
+            )
+
+            for mensaje in mensajes:
+
+                try:
+
+                    notificaciones.notificar(
+                        mensaje
+                    )
+
+                    log.info(
+                        "[ejecuciones] "
+                        "Notificación enviada: "
+                        f"{mensaje}"
+                    )
+
+                except Exception as e:
+
+                    log.error(
+                        f"[ejecuciones] "
+                        f"Error enviando "
+                        f"Telegram: {e}"
+                    )
+
+        except Exception as e:
+
+            log.error(
+                f"[ejecuciones] "
+                f"Error monitorizando "
+                f"órdenes: {e}"
+            )
+
+        # Comprobar cada 30 segundos
+        time.sleep(30)
+
+
+# =========================================================
+# LOOP CRIPTO
+# =========================================================
 
 def loop_cripto():
 
@@ -318,32 +453,46 @@ def loop_cripto():
             for ticker in config.CRYPTO_TICKERS:
 
                 try:
-                    revisar_ticker(ticker)
+
+                    revisar_ticker(
+                        ticker
+                    )
 
                 except Exception as e:
 
                     log.error(
-                        f"[cripto] Error procesando "
+                        f"[cripto] Error "
+                        f"procesando "
                         f"{ticker}: {e}"
                     )
 
         except Exception as e:
 
             log.error(
-                f"[cripto] Error en el loop: {e}"
+                f"[cripto] Error en "
+                f"el loop de cripto: {e}"
             )
 
             try:
+
                 notificaciones.notificar(
-                    f"⚠️ Error en el loop de cripto: {e}"
+                    f"⚠️ Error en el loop "
+                    f"de cripto: {e}"
                 )
+
             except Exception:
+
                 pass
 
         time.sleep(
-            60 * config.CRYPTO_CHECK_INTERVAL_MINUTES
+            60
+            * config.CRYPTO_CHECK_INTERVAL_MINUTES
         )
 
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
 
@@ -356,9 +505,11 @@ def main():
 
     log.info(
         f"Acciones: {config.TICKERS} "
-        f"(cada {config.CHECK_INTERVAL_MINUTES} min) | "
+        f"(cada "
+        f"{config.CHECK_INTERVAL_MINUTES} min) | "
         f"Cripto: {config.CRYPTO_TICKERS} "
-        f"(cada {config.CRYPTO_CHECK_INTERVAL_MINUTES} min)"
+        f"(cada "
+        f"{config.CRYPTO_CHECK_INTERVAL_MINUTES} min)"
     )
 
     try:
@@ -367,19 +518,33 @@ def main():
             f"🤖 Bot iniciado "
             f"({'paper' if config.PAPER else 'REAL'}) — "
             f"acciones: "
-            f"{', '.join(config.TICKERS) or '(ninguna)'} — "
-            f"cripto: "
+            f"{', '.join(config.TICKERS) or '(ninguna)'} "
+            f"— cripto: "
             f"{', '.join(config.CRYPTO_TICKERS) or '(ninguna)'}"
         )
 
     except Exception as e:
 
         log.warning(
-            f"No se pudo enviar notificación de inicio: {e}"
+            f"No se pudo enviar "
+            f"notificación de inicio: {e}"
         )
+
+    # =====================================================
+    # CREAR HILOS
+    # =====================================================
 
     hilos = []
 
+    # Monitor de ejecuciones
+    hilos.append(
+        threading.Thread(
+            target=loop_ejecuciones,
+            daemon=True,
+        )
+    )
+
+    # Acciones
     if config.TICKERS:
 
         hilos.append(
@@ -389,6 +554,7 @@ def main():
             )
         )
 
+    # Cripto
     if config.CRYPTO_TICKERS:
 
         hilos.append(
@@ -398,22 +564,45 @@ def main():
             )
         )
 
+    # =====================================================
+    # COMPROBAR QUE HAY ALGO QUE EJECUTAR
+    # =====================================================
+
     if not hilos:
 
         log.error(
-            "No hay TICKERS ni CRYPTO_TICKERS "
-            "configurados. Nada que hacer."
+            "No hay TICKERS ni "
+            "CRYPTO_TICKERS configurados. "
+            "Nada que hacer."
         )
 
         return
 
+    # =====================================================
+    # ARRANCAR HILOS
+    # =====================================================
+
     for hilo in hilos:
+
         hilo.start()
 
-    # Mantiene vivo el proceso principal.
+    log.info(
+        "Todos los procesos del bot "
+        "han sido iniciados correctamente."
+    )
+
+    # =====================================================
+    # MANTENER VIVO EL PROCESO PRINCIPAL
+    # =====================================================
+
     while True:
+
         time.sleep(60)
 
+
+# =========================================================
+# EJECUCIÓN
+# =========================================================
 
 if __name__ == "__main__":
     main()
