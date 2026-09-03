@@ -45,7 +45,7 @@ ESTRATEGIA ORIGINAL DE ACCIONES
 =============================================================
 
 def _generar_senal_acciones(df: pd.DataFrame) -> str:
-“””
+"""
 ESTRATEGIA ORIGINAL DE ACCIONES.
 
 No se modifica.
