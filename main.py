@@ -7,6 +7,7 @@ Gestiona:
 
 - Acciones
 - Scanner crypto automático 24/7
+- Scanner de impulso de acciones
 - Señales de estrategia
 - Control de posiciones
 - Protección automática de acciones
@@ -339,12 +340,134 @@ def revisar_ticker(
             )
         )
 
+        # ====================================================
+        # SCANNER DE IMPULSO DE ACCIONES
+        #
+        # Analiza si la acción está empezando a mostrar
+        # movimiento alcista antes de la señal clásica.
+        #
+        # NO sustituye la protección ni el control de riesgo.
+        # ====================================================
+
+        analisis_impulso = None
+        compra_scanner = False
+
+        if not broker.es_cripto(ticker):
+
+            try:
+
+                analisis_impulso = (
+                    estrategia.analizar_impulso_acciones(
+                        df,
+                        ticker,
+                    )
+                )
+
+                score_impulso = float(
+                    analisis_impulso.get(
+                        "score",
+                        0,
+                    )
+                )
+
+                rsi_impulso = float(
+                    analisis_impulso.get(
+                        "rsi",
+                        0,
+                    )
+                )
+
+                volumen_impulso = float(
+                    analisis_impulso.get(
+                        "volumen_ratio",
+                        0,
+                    )
+                )
+
+                momentum_impulso = float(
+                    analisis_impulso.get(
+                        "momentum_pct",
+                        0,
+                    )
+                )
+
+                atr_pct_impulso = float(
+                    analisis_impulso.get(
+                        "atr_pct",
+                        0,
+                    )
+                )
+
+                breakout_impulso = bool(
+                    analisis_impulso.get(
+                        "breakout",
+                        False,
+                    )
+                )
+
+                compra_scanner = bool(
+                    analisis_impulso.get(
+                        "comprar",
+                        False,
+                    )
+                )
+
+                log.info(
+                    f"[acciones scanner] "
+                    f"{ticker}: "
+                    f"score={score_impulso:.1f} "
+                    f"comprar={compra_scanner} "
+                    f"RSI={rsi_impulso:.1f} "
+                    f"vol={volumen_impulso:.2f}x "
+                    f"momentum={momentum_impulso:+.2f}% "
+                    f"ATR={atr_pct_impulso:.2f}% "
+                    f"breakout={breakout_impulso}"
+                )
+
+            except Exception as e:
+
+                log.warning(
+                    f"[acciones scanner] "
+                    f"{ticker}: error analizando "
+                    f"impulso: {e}"
+                )
+
+        # ====================================================
+        # SEÑAL CLÁSICA
+        # ====================================================
+
         senal = (
             estrategia.generar_senal(
                 df,
                 ticker,
             )
         )
+
+        # ====================================================
+        # COMBINACIÓN DE SEÑALES
+        #
+        # Si el scanner detecta un impulso alcista válido,
+        # puede generar una entrada aunque la estrategia
+        # clásica todavía no haya generado COMPRAR.
+        #
+        # La estrategia clásica sigue teniendo prioridad para
+        # las ventas.
+        # ====================================================
+
+        senal_original = senal
+
+        if (
+            compra_scanner
+            and senal != "VENDER"
+        ):
+
+            senal = "COMPRAR"
+
+            log.info(
+                f"[acciones scanner] "
+                f"{ticker}: entrada por "
+                "scanner de impulso."
+            )
 
         actual = df.iloc[-1]
 
@@ -378,13 +501,40 @@ def revisar_ticker(
             )
         )
 
-        log.info(
-            f"{ticker}: "
-            f"precio=${precio_actual:.2f} "
-            f"señal={senal} "
-            f"posición_abierta="
-            f"{posicion_abierta}"
-        )
+        if analisis_impulso is not None:
+
+            try:
+
+                log.info(
+                    f"{ticker}: "
+                    f"precio=${precio_actual:.2f} "
+                    f"señal_clásica={senal_original} "
+                    f"señal_final={senal} "
+                    f"scanner="
+                    f"{'🟢' if compra_scanner else '⚪'} "
+                    f"posición_abierta="
+                    f"{posicion_abierta}"
+                )
+
+            except Exception:
+
+                log.info(
+                    f"{ticker}: "
+                    f"precio=${precio_actual:.2f} "
+                    f"señal={senal} "
+                    f"posición_abierta="
+                    f"{posicion_abierta}"
+                )
+
+        else:
+
+            log.info(
+                f"{ticker}: "
+                f"precio=${precio_actual:.2f} "
+                f"señal={senal} "
+                f"posición_abierta="
+                f"{posicion_abierta}"
+            )
 
         # ====================================================
         # PROTECCIÓN ACCIONES
@@ -632,7 +782,7 @@ def revisar_ticker(
                         return
 
         # ====================================================
-        # COMPRA NORMAL
+        # COMPRA NORMAL / SCANNER
         # ====================================================
 
         if (
@@ -732,9 +882,104 @@ def revisar_ticker(
 
             if mensaje:
 
-                notificaciones.notificar(
-                    mensaje
-                )
+                if compra_scanner:
+
+                    score = float(
+                        analisis_impulso.get(
+                            "score",
+                            0,
+                        )
+                    )
+
+                    rsi = float(
+                        analisis_impulso.get(
+                            "rsi",
+                            0,
+                        )
+                    )
+
+                    volumen = float(
+                        analisis_impulso.get(
+                            "volumen_ratio",
+                            0,
+                        )
+                    )
+
+                    momentum = float(
+                        analisis_impulso.get(
+                            "momentum_pct",
+                            0,
+                        )
+                    )
+
+                    razones = (
+                        analisis_impulso.get(
+                            "motivo",
+                            [],
+                        )
+                    )
+
+                    if not isinstance(
+                        razones,
+                        list,
+                    ):
+
+                        razones = [
+                            str(razones)
+                        ]
+
+                    razones_texto = (
+                        ", ".join(
+                            str(x)
+                            for x in razones[:6]
+                        )
+                    )
+
+                    if not razones_texto:
+
+                        razones_texto = (
+                            "impulso alcista confirmado"
+                        )
+
+                    mensaje_scanner = (
+                        "🚀 SCANNER ACCIONES — "
+                        "OPORTUNIDAD DETECTADA\n"
+                        "━━━━━━━━━━━━━━━━━━\n"
+                        f"📈 {ticker}\n"
+                        f"💵 Precio: "
+                        f"${precio_actual:.2f}\n"
+                        f"🎯 Score: "
+                        f"{score:.0f}/100\n"
+                        f"📊 RSI: "
+                        f"{rsi:.1f}\n"
+                        f"📈 Volumen: "
+                        f"{volumen:.2f}x\n"
+                        f"⚡ Momentum: "
+                        f"{momentum:+.2f}%\n\n"
+                        f"✅ {razones_texto}\n\n"
+                        f"{mensaje}"
+                    )
+
+                    notificaciones.notificar(
+                        mensaje_scanner
+                    )
+
+                    log.info(
+                        f"[acciones scanner] "
+                        f"COMPRA EJECUTADA: "
+                        f"{ticker} | "
+                        f"score={score:.1f} | "
+                        f"RSI={rsi:.1f} | "
+                        f"vol={volumen:.2f}x | "
+                        f"momentum="
+                        f"{momentum:+.2f}%"
+                    )
+
+                else:
+
+                    notificaciones.notificar(
+                        mensaje
+                    )
 
             return
 
@@ -1814,11 +2059,8 @@ def loop_proteccion_crypto():
 
             log.error(
                 "[crypto] Error en "
-                f"protección crypto: {e}"
+                f"{e}"
             )
-
-        # Protección mucho más frecuente
-        # que el scanner.
 
         time.sleep(15)
 
@@ -2130,6 +2372,7 @@ def procesar_comando_telegram(
             f"📈 Posiciones: "
             f"{datos['numero_posiciones']}\n\n"
             f"₿ Scanner crypto: {scanner}\n"
+            f"📈 Scanner acciones: ACTIVO\n"
             f"🤖 {config.BOT_NOMBRE}"
         )
 
@@ -2280,7 +2523,8 @@ def procesar_comando_telegram(
             f"{ultimo_scan}\n"
             f"Último candidato: "
             f"{candidato}\n\n"
-            "🛡️ Protección crypto: ACTIVA"
+            "🛡️ Protección crypto: ACTIVA\n"
+            "📈 Scanner acciones: ACTIVO"
         )
 
     if comando in (
@@ -2330,6 +2574,10 @@ def main():
     )
 
     log.info(
+        "Scanner acciones: ACTIVO"
+    )
+
+    log.info(
         "Scanner crypto: "
         f"{'ACTIVO' if config.CRYPTO_SCANNER_ENABLED else 'DESACTIVADO'}"
     )
@@ -2351,6 +2599,7 @@ def main():
             f"{'PAPER' if config.PAPER else 'REAL'}\n"
             f"Acciones: "
             f"{', '.join(config.TICKERS) or '(ninguna)'}\n"
+            f"📈 Scanner acciones: ACTIVO\n"
             f"₿ Scanner crypto: "
             f"{'ACTIVO' if config.CRYPTO_SCANNER_ENABLED else 'DESACTIVADO'}"
         )
