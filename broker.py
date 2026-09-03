@@ -10,9 +10,11 @@ Todo lo que toca la API de Alpaca:
 - Gestionar protección SL/TP
 - Controlar tamaño de posición
 - Detectar ejecuciones
+- Consultar segunda cuenta
 """
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -50,7 +52,7 @@ log = logging.getLogger(__name__)
 
 
 # ============================================================
-# CLIENTES ALPACA
+# CLIENTES ALPACA - CUENTA PRINCIPAL
 # ============================================================
 
 cliente_trading = TradingClient(
@@ -68,6 +70,55 @@ cliente_datos_crypto = CryptoHistoricalDataClient(
     config.API_KEY,
     config.API_SECRET,
 )
+
+
+# ============================================================
+# CLIENTE ALPACA - SEGUNDA CUENTA
+# ============================================================
+
+SECOND_API_KEY = os.environ.get(
+    "SECOND_ALPACA_API_KEY",
+    "",
+)
+
+SECOND_API_SECRET = os.environ.get(
+    "SECOND_ALPACA_API_SECRET",
+    "",
+)
+
+cliente_trading_secundaria = None
+
+if (
+    SECOND_API_KEY
+    and SECOND_API_SECRET
+):
+
+    try:
+
+        cliente_trading_secundaria = TradingClient(
+            SECOND_API_KEY,
+            SECOND_API_SECRET,
+            paper=config.PAPER,
+        )
+
+        log.info(
+            "[segunda cuenta] "
+            "Cliente Alpaca secundario inicializado."
+        )
+
+    except Exception as e:
+
+        log.error(
+            "[segunda cuenta] "
+            f"No se pudo inicializar el cliente: {e}"
+        )
+
+else:
+
+    log.warning(
+        "[segunda cuenta] "
+        "Credenciales secundarias no configuradas."
+    )
 
 
 # ============================================================
@@ -96,6 +147,7 @@ def es_cripto(
         "BCHUSD",
         "UNIUSD",
         "AAVEUSD",
+        "HYPEUSD",
     )
 
     return ticker in criptos
@@ -354,7 +406,7 @@ def obtener_datos(
 
 
 # ============================================================
-# POSICIONES
+# POSICIONES - CUENTA PRINCIPAL
 # ============================================================
 
 def obtener_posicion(
@@ -483,7 +535,7 @@ def contar_posiciones_abiertas() -> int:
 
 
 # ============================================================
-# INFORMACIÓN DE CUENTA PARA TELEGRAM
+# INFORMACIÓN DE CUENTA PRINCIPAL PARA TELEGRAM
 # ============================================================
 
 def obtener_resumen_cuenta():
@@ -491,13 +543,6 @@ def obtener_resumen_cuenta():
     """
     Obtiene información general de la cuenta
     para los comandos de Telegram.
-
-    beneficio_dia:
-        Equity actual - equity del cierre anterior.
-
-    beneficio_posiciones:
-        Beneficio/pérdida no realizado de las
-        posiciones actualmente abiertas.
     """
 
     try:
@@ -671,6 +716,231 @@ def obtener_posiciones_telegram():
         log.error(
             f"[cuenta] Error obteniendo "
             f"posiciones para Telegram: {e}"
+        )
+
+        return []
+
+
+# ============================================================
+# SEGUNDA CUENTA - RESUMEN
+# ============================================================
+
+def obtener_resumen_cuenta_secundaria():
+
+    """
+    Consulta la segunda cuenta de Alpaca.
+
+    IMPORTANTE:
+    Este cliente solamente se utiliza para CONSULTA.
+    No se usa para comprar, vender ni modificar órdenes.
+    """
+
+    if cliente_trading_secundaria is None:
+
+        log.error(
+            "[segunda cuenta] "
+            "Credenciales de Alpaca no configuradas."
+        )
+
+        return None
+
+    try:
+
+        cuenta = (
+            cliente_trading_secundaria
+            .get_account()
+        )
+
+        equity = float(
+            getattr(
+                cuenta,
+                "equity",
+                0,
+            )
+            or 0
+        )
+
+        cash = float(
+            getattr(
+                cuenta,
+                "cash",
+                0,
+            )
+            or 0
+        )
+
+        buying_power = float(
+            getattr(
+                cuenta,
+                "buying_power",
+                0,
+            )
+            or 0
+        )
+
+        last_equity = float(
+            getattr(
+                cuenta,
+                "last_equity",
+                0,
+            )
+            or 0
+        )
+
+        beneficio_dia = (
+            equity
+            - last_equity
+        )
+
+        posiciones = (
+            cliente_trading_secundaria
+            .get_all_positions()
+        )
+
+        beneficio_posiciones = 0.0
+
+        for posicion in posiciones:
+
+            beneficio_posiciones += float(
+                getattr(
+                    posicion,
+                    "unrealized_pl",
+                    0,
+                )
+                or 0
+            )
+
+        log.info(
+            "[segunda cuenta] "
+            f"Consulta realizada correctamente. "
+            f"Posiciones={len(posiciones)}"
+        )
+
+        return {
+            "equity": equity,
+            "cash": cash,
+            "buying_power": buying_power,
+            "beneficio_dia": beneficio_dia,
+            "beneficio_posiciones": beneficio_posiciones,
+            "numero_posiciones": len(posiciones),
+        }
+
+    except Exception as e:
+
+        log.error(
+            "[segunda cuenta] "
+            f"Error obteniendo resumen: {e}"
+        )
+
+        return None
+
+
+# ============================================================
+# SEGUNDA CUENTA - POSICIONES
+# ============================================================
+
+def obtener_posiciones_secundaria():
+
+    """
+    Obtiene las posiciones abiertas de la segunda cuenta.
+
+    Solo lectura.
+    """
+
+    if cliente_trading_secundaria is None:
+
+        log.error(
+            "[segunda cuenta] "
+            "Credenciales de Alpaca no configuradas."
+        )
+
+        return []
+
+    try:
+
+        posiciones = (
+            cliente_trading_secundaria
+            .get_all_positions()
+        )
+
+        resultado = []
+
+        for posicion in posiciones:
+
+            simbolo = str(
+                getattr(
+                    posicion,
+                    "symbol",
+                    "?",
+                )
+            )
+
+            cantidad = getattr(
+                posicion,
+                "qty",
+                "?",
+            )
+
+            entrada = float(
+                getattr(
+                    posicion,
+                    "avg_entry_price",
+                    0,
+                )
+                or 0
+            )
+
+            actual = float(
+                getattr(
+                    posicion,
+                    "current_price",
+                    0,
+                )
+                or 0
+            )
+
+            beneficio = float(
+                getattr(
+                    posicion,
+                    "unrealized_pl",
+                    0,
+                )
+                or 0
+            )
+
+            beneficio_pct = float(
+                getattr(
+                    posicion,
+                    "unrealized_plpc",
+                    0,
+                )
+                or 0
+            ) * 100
+
+            resultado.append(
+                {
+                    "simbolo": simbolo,
+                    "cantidad": cantidad,
+                    "entrada": entrada,
+                    "actual": actual,
+                    "beneficio": beneficio,
+                    "beneficio_pct": beneficio_pct,
+                }
+            )
+
+        log.info(
+            "[segunda cuenta] "
+            f"Posiciones obtenidas: "
+            f"{len(resultado)}"
+        )
+
+        return resultado
+
+    except Exception as e:
+
+        log.error(
+            "[segunda cuenta] "
+            f"Error obteniendo posiciones: {e}"
         )
 
         return []
