@@ -1,6 +1,6 @@
 """
 Todo lo que toca la API de Alpaca:
-datos, posiciones y órdenes.
+datos, posiciones y ordenes.
 """
 
 import logging
@@ -191,7 +191,7 @@ def precio_actual_posicion(ticker: str):
 
 
 # =========================================================
-# ÓRDENES ABIERTAS
+# ORDENES ABIERTAS
 # =========================================================
 
 def obtener_ordenes_abiertas(ticker: str):
@@ -213,22 +213,22 @@ def obtener_ordenes_abiertas(ticker: str):
 
         log.error(
             f"{ticker}: error consultando "
-            f"órdenes abiertas: {e}"
+            f"ordenes abiertas: {e}"
         )
 
         return []
 
 
 # =========================================================
-# COMPROBAR PROTECCIÓN
+# COMPROBAR PROTECCION
 # =========================================================
 
 def tiene_proteccion(
     ticker: str,
 ) -> tuple[bool, bool]:
 
-    stop = False
-    take_profit = False
+    tiene_sl = False
+    tiene_tp = False
 
     ordenes = obtener_ordenes_abiertas(
         ticker
@@ -238,17 +238,7 @@ def tiene_proteccion(
 
         try:
 
-            if str(
-                orden.order_class
-            ).lower().endswith("oco"):
-
-                if orden.take_profit is not None:
-                    take_profit = True
-
-                if orden.stop_loss is not None:
-                    stop = True
-
-            orden_tipo = str(
+            order_type = str(
                 getattr(
                     orden,
                     "type",
@@ -256,21 +246,61 @@ def tiene_proteccion(
                 )
             ).lower()
 
-            if "stop" in orden_tipo:
-                stop = True
+            order_class = str(
+                getattr(
+                    orden,
+                    "order_class",
+                    "",
+                )
+            ).lower()
 
-            if "limit" in orden_tipo:
-                take_profit = True
+            stop_loss = getattr(
+                orden,
+                "stop_loss",
+                None,
+            )
+
+            take_profit = getattr(
+                orden,
+                "take_profit",
+                None,
+            )
+
+            # -------------------------------------------------
+            # OCO
+            # -------------------------------------------------
+
+            if "oco" in order_class:
+
+                if stop_loss is not None:
+                    tiene_sl = True
+
+                if take_profit is not None:
+                    tiene_tp = True
+
+            # -------------------------------------------------
+            # STOP
+            # -------------------------------------------------
+
+            if "stop" in order_type:
+                tiene_sl = True
+
+            # -------------------------------------------------
+            # LIMIT
+            # -------------------------------------------------
+
+            if "limit" in order_type:
+                tiene_tp = True
 
         except Exception:
 
             continue
 
-    return stop, take_profit
+    return tiene_sl, tiene_tp
 
 
 # =========================================================
-# TAMAÑO DE POSICIÓN
+# TAMAÑO DE POSICION
 # =========================================================
 
 def calcular_tamano_posicion(
@@ -343,7 +373,7 @@ def comprar(
     if cantidad <= 0:
 
         log.warning(
-            f"{ticker}: tamaño de posición "
+            f"{ticker}: tamano de posicion "
             f"calculado es 0."
         )
 
@@ -378,7 +408,7 @@ def comprar(
         return mensaje
 
     # -----------------------------------------------------
-    # ACCIONES — BRACKET
+    # ACCIONES - BRACKET
     # -----------------------------------------------------
 
     stop_loss = round(
@@ -403,7 +433,7 @@ def comprar(
     if stop_loss >= precio:
 
         log.error(
-            f"{ticker}: SL inválido "
+            f"{ticker}: SL invalido "
             f"(${stop_loss}) >= "
             f"entrada (${precio})."
         )
@@ -413,7 +443,7 @@ def comprar(
     if take_profit <= precio:
 
         log.error(
-            f"{ticker}: TP inválido "
+            f"{ticker}: TP invalido "
             f"(${take_profit}) <= "
             f"entrada (${precio})."
         )
@@ -452,7 +482,7 @@ def comprar(
 
 
 # =========================================================
-# PROTEGER POSICIÓN EXISTENTE
+# PROTEGER POSICION EXISTENTE
 # =========================================================
 
 def proteger_posicion(
@@ -484,13 +514,17 @@ def proteger_posicion(
 
         log.error(
             f"{ticker}: no se pudo leer "
-            f"la posición: {e}"
+            f"la posicion: {e}"
         )
 
         return None
 
     if cantidad <= 0:
         return None
+
+    # -----------------------------------------------------
+    # COMPROBAR PROTECCION ANTES DE HACER NADA
+    # -----------------------------------------------------
 
     tiene_sl, tiene_tp = tiene_proteccion(
         ticker
@@ -499,11 +533,16 @@ def proteger_posicion(
     if tiene_sl and tiene_tp:
 
         log.info(
-            f"{ticker}: posición ya protegida "
-            f"(SL ✅ | TP ✅)."
+            f"{ticker}: posicion ya protegida "
+            f"(SL OK | TP OK)."
         )
 
         return None
+
+    # -----------------------------------------------------
+    # SI FALTA ALGUNA PROTECCION, LIMPIAR SOLO LAS
+    # ORDENES DE VENTA ABIERTAS Y CREAR UNA OCO NUEVA
+    # -----------------------------------------------------
 
     ordenes = obtener_ordenes_abiertas(
         ticker
@@ -513,9 +552,15 @@ def proteger_posicion(
 
         try:
 
-            if str(
-                orden.side
-            ).lower().endswith("sell"):
+            side = str(
+                getattr(
+                    orden,
+                    "side",
+                    "",
+                )
+            ).lower()
+
+            if "sell" in side:
 
                 trading_client.cancel_order_by_id(
                     orden.id
@@ -525,7 +570,7 @@ def proteger_posicion(
 
             log.warning(
                 f"{ticker}: no se pudo cancelar "
-                f"orden {orden.id}: {e}"
+                f"orden {getattr(orden, 'id', '?')}: {e}"
             )
 
     stop_loss = round(
@@ -550,7 +595,7 @@ def proteger_posicion(
     if stop_loss >= precio_entrada:
 
         log.error(
-            f"{ticker}: SL calculado inválido."
+            f"{ticker}: SL calculado invalido."
         )
 
         return None
@@ -558,7 +603,7 @@ def proteger_posicion(
     if take_profit <= precio_entrada:
 
         log.error(
-            f"{ticker}: TP calculado inválido."
+            f"{ticker}: TP calculado invalido."
         )
 
         return None
@@ -584,7 +629,7 @@ def proteger_posicion(
         )
 
         mensaje = (
-            f"🛡️ PROTECCIÓN {ticker}: "
+            f"PROTECCION {ticker}: "
             f"SL ${stop_loss:.2f} | "
             f"TP ${take_profit:.2f} "
             f"(entrada "
@@ -599,14 +644,14 @@ def proteger_posicion(
 
         log.error(
             f"{ticker}: ERROR creando "
-            f"protección: {e}"
+            f"proteccion: {e}"
         )
 
         return None
 
 
 # =========================================================
-# CANCELAR ÓRDENES
+# CANCELAR ORDENES
 # =========================================================
 
 def _cancelar_ordenes_abiertas(
@@ -654,7 +699,7 @@ def vender(
 
         mensaje = (
             f"VENTA {ticker}: "
-            f"posición cerrada."
+            f"posicion cerrada."
         )
 
         log.info(mensaje)
@@ -672,7 +717,7 @@ def vender(
 
 
 # =========================================================
-# MONITOR DE ÓRDENES EJECUTADAS
+# MONITOR DE ORDENES EJECUTADAS
 # =========================================================
 
 _ordenes_notificadas = set()
@@ -680,11 +725,6 @@ _monitor_ejecuciones_inicializado = False
 
 
 def obtener_ordenes_ejecutadas():
-
-    """
-    Devuelve las órdenes ejecutadas recientemente.
-    Solo devuelve órdenes FILLED.
-    """
 
     try:
 
@@ -701,7 +741,11 @@ def obtener_ordenes_ejecutadas():
             orden
             for orden in ordenes
             if str(
-                orden.status
+                getattr(
+                    orden,
+                    "status",
+                    "",
+                )
             ).lower().endswith("filled")
         ]
 
@@ -709,21 +753,13 @@ def obtener_ordenes_ejecutadas():
 
         log.error(
             f"Error consultando "
-            f"órdenes ejecutadas: {e}"
+            f"ordenes ejecutadas: {e}"
         )
 
         return []
 
 
 def inicializar_monitor_ejecuciones():
-
-    """
-    Marca como ya notificadas las órdenes FILLED
-    que ya existían cuando arrancó el bot.
-
-    Así un reinicio de Railway no genera
-    notificaciones antiguas.
-    """
 
     global _monitor_ejecuciones_inicializado
 
@@ -749,18 +785,11 @@ def inicializar_monitor_ejecuciones():
     log.info(
         f"[ejecuciones] Monitor inicializado. "
         f"{len(_ordenes_notificadas)} "
-        f"órdenes antiguas ignoradas."
+        f"ordenes antiguas ignoradas."
     )
 
 
 def detectar_ejecuciones():
-
-    """
-    Detecta nuevas órdenes FILLED.
-
-    Solo devuelve ejecuciones que no hayan
-    sido notificadas anteriormente.
-    """
 
     mensajes = []
 
@@ -778,7 +807,11 @@ def detectar_ejecuciones():
                 continue
 
             side = str(
-                orden.side
+                getattr(
+                    orden,
+                    "side",
+                    "",
+                )
             ).lower()
 
             if "buy" in side:
@@ -796,7 +829,11 @@ def detectar_ejecuciones():
                 continue
 
             ticker = str(
-                orden.symbol
+                getattr(
+                    orden,
+                    "symbol",
+                    "?",
+                )
             )
 
             cantidad = getattr(
@@ -882,11 +919,5 @@ def detectar_ejecuciones():
                 "No se pudo procesar "
                 f"una orden ejecutada: {e}"
             )
-
-    if len(
-        _ordenes_notificadas
-    ) > 500:
-
-        _ordenes_notificadas.clear()
 
     return mensajes
