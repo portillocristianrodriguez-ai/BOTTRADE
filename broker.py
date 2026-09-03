@@ -4,15 +4,19 @@ broker.py
 Todo lo que toca la API de Alpaca:
 
 - Obtener datos de mercado
-- Descubrir cryptos negociables
-- Escanear datos crypto por lotes
+- Descubrir criptomonedas negociables
+- Escanear criptomonedas en lote
 - Consultar posiciones
 - Consultar cuenta
 - Ejecutar compras/ventas
-- Gestionar protección SL/TP de acciones
+- Gestionar protección de acciones
 - Controlar tamaño de posición
 - Detectar ejecuciones
 - Consultar segunda cuenta
+
+IMPORTANTE:
+La cuenta secundaria es SOLO LECTURA.
+Nunca se envían órdenes a la cuenta secundaria.
 """
 
 import logging
@@ -40,11 +44,17 @@ from alpaca.data.historical import (
     StockHistoricalDataClient,
     CryptoHistoricalDataClient,
 )
+
 from alpaca.data.requests import (
     StockBarsRequest,
     CryptoBarsRequest,
 )
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+from alpaca.data.timeframe import (
+    TimeFrame,
+    TimeFrameUnit,
+)
+
 from alpaca.data.enums import DataFeed
 
 import config
@@ -122,7 +132,7 @@ else:
 
 
 # ============================================================
-# CACHE SCANNER CRYPTO
+# CACHE DEL UNIVERSO CRYPTO
 # ============================================================
 
 _universo_crypto_cache = []
@@ -131,7 +141,26 @@ _universo_crypto_actualizado = None
 
 
 # ============================================================
-# IDENTIFICACIÓN CRYPTO
+# CRIPTOMONEDAS ESTABLES QUE NO QUEREMOS ESCANEAR
+# ============================================================
+
+_ESTABLES = {
+    "USDT",
+    "USDC",
+    "DAI",
+    "USDG",
+    "PYUSD",
+    "USDS",
+    "FDUSD",
+    "TUSD",
+    "USDP",
+    "GUSD",
+    "EURC",
+}
+
+
+# ============================================================
+# IDENTIFICAR CRYPTO
 # ============================================================
 
 def es_cripto(ticker: str) -> bool:
@@ -141,6 +170,7 @@ def es_cripto(ticker: str) -> bool:
     ).upper().strip()
 
     if "/" in ticker:
+
         return True
 
     criptos = (
@@ -160,6 +190,10 @@ def es_cripto(ticker: str) -> bool:
     return ticker in criptos
 
 
+# ============================================================
+# NORMALIZAR CRYPTO
+# ============================================================
+
 def normalizar_ticker_crypto(
     ticker: str,
 ) -> str:
@@ -169,6 +203,7 @@ def normalizar_ticker_crypto(
     ).upper().strip()
 
     if "/" in ticker:
+
         return ticker
 
     if ticker.endswith("USD"):
@@ -176,10 +211,15 @@ def normalizar_ticker_crypto(
         base = ticker[:-3]
 
         if base:
+
             return f"{base}/USD"
 
     return ticker
 
+
+# ============================================================
+# TICKER PARA COMPARACIONES
+# ============================================================
 
 def ticker_comparacion(
     ticker: str,
@@ -202,7 +242,7 @@ def ticker_comparacion(
 
 
 # ============================================================
-# UNIVERSO AUTOMÁTICO DE CRYPTO
+# DESCUBRIR UNIVERSO CRYPTO
 # ============================================================
 
 def obtener_universo_crypto():
@@ -217,13 +257,12 @@ def obtener_universo_crypto():
         )
 
         # ----------------------------------------------------
-        # CACHE 30 MINUTOS
+        # CACHE
         # ----------------------------------------------------
 
         if (
-            _universo_crypto_actualizado
-            is not None
-            and _universo_crypto_cache
+            _universo_crypto_cache
+            and _universo_crypto_actualizado
         ):
 
             minutos = (
@@ -231,164 +270,206 @@ def obtener_universo_crypto():
                 - _universo_crypto_actualizado
             ).total_seconds() / 60
 
-            if minutos < 30:
+            refresh = getattr(
+                config,
+                "CRYPTO_UNIVERSE_REFRESH_MINUTES",
+                30,
+            )
+
+            if minutos < refresh:
 
                 return list(
                     _universo_crypto_cache
                 )
 
         # ----------------------------------------------------
-        # CONSULTAR ASSETS
+        # OBTENER ACTIVOS
         # ----------------------------------------------------
 
-        assets = (
-            cliente_trading
-            .get_all_assets()
+        activos = (
+            cliente_trading.get_all_assets()
         )
 
         universo = []
 
-        estables = {
-            "USDT",
-            "USDC",
-            "DAI",
-            "PYUSD",
-            "USDP",
-            "TUSD",
-            "GUSD",
-            "USDG",
-            "FDUSD",
-            "USDS",
-            "USDE",
-            "EURC",
-        }
-
-        for asset in assets:
+        for activo in activos:
 
             try:
 
                 simbolo = str(
                     getattr(
-                        asset,
+                        activo,
                         "symbol",
                         "",
                     )
                 ).upper().strip()
 
                 if not simbolo:
+
                     continue
 
-                # --------------------------------------------
-                # CLASE DEL ASSET
-                # --------------------------------------------
+                # ------------------------------------------------
+                # SOLO PARES USD
+                # ------------------------------------------------
 
-                clase = str(
-                    getattr(
-                        asset,
-                        "asset_class",
-                        getattr(
-                            asset,
-                            "class",
-                            "",
-                        ),
-                    )
-                ).lower()
-
-                if "crypto" not in clase:
-                    continue
-
-                # --------------------------------------------
-                # TRADABLE
-                # --------------------------------------------
-
-                tradable = getattr(
-                    asset,
-                    "tradable",
-                    False,
-                )
-
-                if not tradable:
-                    continue
-
-                # --------------------------------------------
-                # NORMALIZAR
-                # --------------------------------------------
-
-                ticker = (
+                simbolo_normalizado = (
                     normalizar_ticker_crypto(
                         simbolo
                     )
                 )
 
-                # Solo pares USD
-                if not ticker.endswith(
+                if not simbolo_normalizado.endswith(
                     "/USD"
                 ):
+
                     continue
 
-                base = ticker.split(
-                    "/"
-                )[0]
+                # ------------------------------------------------
+                # TRADABLE
+                # ------------------------------------------------
 
-                # No comprar stablecoins
-                if base in estables:
+                tradable = getattr(
+                    activo,
+                    "tradable",
+                    False,
+                )
+
+                if not bool(tradable):
+
+                    continue
+
+                # ------------------------------------------------
+                # ESTADO
+                # ------------------------------------------------
+
+                status = str(
+                    getattr(
+                        activo,
+                        "status",
+                        "",
+                    )
+                ).lower()
+
+                if (
+                    status
+                    and "active" not in status
+                ):
+
+                    continue
+
+                # ------------------------------------------------
+                # CLASE
+                # ------------------------------------------------
+
+                clase = getattr(
+                    activo,
+                    "asset_class",
+                    None,
+                )
+
+                if clase is None:
+
+                    clase = getattr(
+                        activo,
+                        "class",
+                        "",
+                    )
+
+                clase_texto = str(
+                    clase
+                ).lower()
+
+                if (
+                    clase_texto
+                    and "crypto"
+                    not in clase_texto
+                ):
+
+                    continue
+
+                # ------------------------------------------------
+                # EXCLUIR STABLECOINS
+                # ------------------------------------------------
+
+                base = (
+                    simbolo_normalizado
+                    .split("/")[0]
+                )
+
+                excluir_estables = getattr(
+                    config,
+                    "CRYPTO_EXCLUIR_ESTABLES",
+                    True,
+                )
+
+                if (
+                    excluir_estables
+                    and base in _ESTABLES
+                ):
+
                     continue
 
                 universo.append(
-                    ticker
+                    simbolo_normalizado
                 )
 
             except Exception as e:
 
                 log.debug(
-                    "[crypto] Asset ignorado: "
-                    f"{e}"
+                    "[crypto] Error "
+                    f"procesando activo: {e}"
                 )
 
         # ----------------------------------------------------
-        # ELIMINAR DUPLICADOS
+        # AÑADIR TICKERS MANUALES COMO FALLBACK
+        # ----------------------------------------------------
+
+        manuales = getattr(
+            config,
+            "CRYPTO_TICKERS",
+            [],
+        )
+
+        for ticker in manuales:
+
+            normalizado = (
+                normalizar_ticker_crypto(
+                    ticker
+                )
+            )
+
+            if not normalizado.endswith(
+                "/USD"
+            ):
+
+                continue
+
+            if normalizado not in universo:
+
+                universo.append(
+                    normalizado
+                )
+
+        # ----------------------------------------------------
+        # ORDENAR
         # ----------------------------------------------------
 
         universo = sorted(
             set(universo)
         )
 
-        # ----------------------------------------------------
-        # ASEGURAR TICKERS MANUALES
-        # ----------------------------------------------------
+        _universo_crypto_cache = (
+            universo
+        )
 
-        for ticker in config.CRYPTO_TICKERS:
-
-            ticker_normalizado = (
-                normalizar_ticker_crypto(
-                    ticker
-                )
-            )
-
-            if (
-                ticker_normalizado.endswith(
-                    "/USD"
-                )
-                and ticker_normalizado
-                not in universo
-            ):
-
-                universo.append(
-                    ticker_normalizado
-                )
-
-        # ----------------------------------------------------
-        # GUARDAR CACHE
-        # ----------------------------------------------------
-
-        _universo_crypto_cache = universo
-
-        _universo_crypto_actualizado = ahora
+        _universo_crypto_actualizado = (
+            ahora
+        )
 
         log.info(
             "[crypto] Universo actualizado: "
-            f"{len(universo)} cryptos USD "
-            "negociables."
+            f"{len(universo)} activos "
+            "crypto USD negociables."
         )
 
         return list(
@@ -399,31 +480,303 @@ def obtener_universo_crypto():
 
         log.error(
             "[crypto] Error obteniendo "
-            f"universo: {e}"
+            f"universo crypto: {e}"
         )
 
-        # Si ya tenemos un universo anterior,
-        # continuamos utilizándolo.
+        # Si falla la actualización,
+        # conservar el último universo válido.
 
         if _universo_crypto_cache:
-
-            log.warning(
-                "[crypto] Utilizando universo "
-                "anterior almacenado."
-            )
 
             return list(
                 _universo_crypto_cache
             )
 
-        # Último recurso
+        # Fallback a los símbolos
+        # configurados manualmente.
+
+        manuales = getattr(
+            config,
+            "CRYPTO_TICKERS",
+            [],
+        )
+
         return [
             normalizar_ticker_crypto(
                 ticker
             )
-            for ticker
-            in config.CRYPTO_TICKERS
+            for ticker in manuales
         ]
+
+
+# ============================================================
+# DATOS CRYPTO EN LOTE
+# ============================================================
+
+def obtener_datos_crypto_lote(
+    tickers,
+    dias=3,
+):
+
+    resultado = {}
+
+    if not tickers:
+
+        return resultado
+
+    try:
+
+        ahora = datetime.now(
+            timezone.utc
+        )
+
+        inicio = (
+            ahora
+            - timedelta(
+                days=dias
+            )
+        )
+
+        batch_size = getattr(
+            config,
+            "CRYPTO_SCAN_BATCH_SIZE",
+            50,
+        )
+
+        try:
+
+            batch_size = int(
+                batch_size
+            )
+
+        except Exception:
+
+            batch_size = 50
+
+        if batch_size <= 0:
+
+            batch_size = 50
+
+        tickers_normalizados = []
+
+        for ticker in tickers:
+
+            normalizado = (
+                normalizar_ticker_crypto(
+                    ticker
+                )
+            )
+
+            if (
+                normalizado
+                not in tickers_normalizados
+            ):
+
+                tickers_normalizados.append(
+                    normalizado
+                )
+
+        # ----------------------------------------------------
+        # CHUNKS
+        # ----------------------------------------------------
+
+        for posicion_inicio in range(
+            0,
+            len(tickers_normalizados),
+            batch_size,
+        ):
+
+            lote = tickers_normalizados[
+                posicion_inicio:
+                posicion_inicio + batch_size
+            ]
+
+            try:
+
+                request = CryptoBarsRequest(
+                    symbol_or_symbols=lote,
+                    timeframe=TimeFrame(
+                        5,
+                        TimeFrameUnit.Minute,
+                    ),
+                    start=inicio,
+                    end=ahora,
+                )
+
+                datos = (
+                    cliente_datos_crypto.get_crypto_bars(
+                        request
+                    )
+                )
+
+                df = datos.df.copy()
+
+                if df is None or df.empty:
+
+                    log.warning(
+                        "[crypto] Lote sin datos: "
+                        f"{len(lote)} símbolos."
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # DATAFRAME MULTIINDEX
+                # ------------------------------------------------
+
+                if isinstance(
+                    df.index,
+                    pd.MultiIndex,
+                ):
+
+                    nombres = list(
+                        df.index.names
+                    )
+
+                    if "symbol" in nombres:
+
+                        for (
+                            simbolo,
+                            grupo,
+                        ) in df.groupby(
+                            level="symbol"
+                        ):
+
+                            try:
+
+                                grupo = (
+                                    grupo
+                                    .droplevel(
+                                        "symbol"
+                                    )
+                                    .copy()
+                                )
+
+                                ticker_normalizado = (
+                                    normalizar_ticker_crypto(
+                                        simbolo
+                                    )
+                                )
+
+                                resultado[
+                                    ticker_normalizado
+                                ] = (
+                                    _limpiar_dataframe_crypto(
+                                        grupo
+                                    )
+                                )
+
+                            except Exception as e:
+
+                                log.debug(
+                                    "[crypto] Error "
+                                    f"separando {simbolo}: "
+                                    f"{e}"
+                                )
+
+                    else:
+
+                        # Fallback para índices
+                        # multi-nivel sin nombre.
+
+                        for clave, grupo in (
+                            df.groupby(
+                                level=0
+                            )
+                        ):
+
+                            try:
+
+                                grupo = (
+                                    grupo
+                                    .droplevel(
+                                        0
+                                    )
+                                    .copy()
+                                )
+
+                                ticker_normalizado = (
+                                    normalizar_ticker_crypto(
+                                        clave
+                                    )
+                                )
+
+                                resultado[
+                                    ticker_normalizado
+                                ] = (
+                                    _limpiar_dataframe_crypto(
+                                        grupo
+                                    )
+                                )
+
+                            except Exception:
+                                continue
+
+                else:
+
+                    # ------------------------------------------------
+                    # DATAFRAME SIMPLE
+                    # ------------------------------------------------
+
+                    if (
+                        "symbol"
+                        in df.columns
+                    ):
+
+                        for (
+                            simbolo,
+                            grupo,
+                        ) in df.groupby(
+                            "symbol"
+                        ):
+
+                            ticker_normalizado = (
+                                normalizar_ticker_crypto(
+                                    simbolo
+                                )
+                            )
+
+                            grupo = (
+                                grupo
+                                .drop(
+                                    columns=[
+                                        "symbol"
+                                    ],
+                                    errors="ignore",
+                                )
+                            )
+
+                            resultado[
+                                ticker_normalizado
+                            ] = (
+                                _limpiar_dataframe_crypto(
+                                    grupo
+                                )
+                            )
+
+            except Exception as e:
+
+                log.error(
+                    "[crypto] Error obteniendo "
+                    f"lote: {e}"
+                )
+
+        log.info(
+            "[crypto] Datos recibidos: "
+            f"{len(resultado)} / "
+            f"{len(tickers_normalizados)}"
+        )
+
+        return resultado
+
+    except Exception as e:
+
+        log.error(
+            "[crypto] Error general "
+            f"obteniendo datos en lote: {e}"
+        )
+
+        return resultado
 
 
 # ============================================================
@@ -435,10 +788,6 @@ def _limpiar_dataframe_crypto(
 ):
 
     try:
-
-        if df is None or df.empty:
-
-            return pd.DataFrame()
 
         df = df.copy()
 
@@ -454,11 +803,6 @@ def _limpiar_dataframe_crypto(
 
             if columna not in df.columns:
 
-                log.debug(
-                    "[crypto] Falta columna "
-                    f"{columna}."
-                )
-
                 return pd.DataFrame()
 
             df[columna] = pd.to_numeric(
@@ -469,6 +813,10 @@ def _limpiar_dataframe_crypto(
         df = df.dropna(
             subset=columnas
         )
+
+        if df.empty:
+
+            return df
 
         df = df.sort_index()
 
@@ -482,8 +830,8 @@ def _limpiar_dataframe_crypto(
 
     except Exception as e:
 
-        log.error(
-            "[crypto] Error limpiando "
+        log.debug(
+            f"[crypto] Error limpiando "
             f"datos: {e}"
         )
 
@@ -491,265 +839,15 @@ def _limpiar_dataframe_crypto(
 
 
 # ============================================================
-# DATOS CRYPTO POR LOTES
+# MERCADO ACCIONES
 # ============================================================
 
-def obtener_datos_crypto_lote(
-    tickers,
-    dias=3,
-):
-    """
-    Obtiene datos de múltiples cryptos
-    mediante peticiones por lotes.
-
-    Devuelve:
-
-        {
-            "BTC/USD": dataframe,
-            "ETH/USD": dataframe,
-            ...
-        }
-    """
-
-    resultado = {}
-
-    if not tickers:
-
-        return resultado
-
-    ahora = datetime.now(
-        timezone.utc
-    )
-
-    inicio = (
-        ahora
-        - timedelta(days=dias)
-    )
-
-    # Máximo de símbolos por petición.
-    tamano_bloque = 50
-
-    tickers_normalizados = []
-
-    for ticker in tickers:
-
-        normalizado = (
-            normalizar_ticker_crypto(
-                ticker
-            )
-        )
-
-        if (
-            normalizado
-            and normalizado
-            not in tickers_normalizados
-        ):
-
-            tickers_normalizados.append(
-                normalizado
-            )
-
-    # ========================================================
-    # PROCESAR LOTES
-    # ========================================================
-
-    for posicion in range(
-        0,
-        len(tickers_normalizados),
-        tamano_bloque,
-    ):
-
-        bloque = tickers_normalizados[
-            posicion:
-            posicion + tamano_bloque
-        ]
-
-        try:
-
-            request = CryptoBarsRequest(
-                symbol_or_symbols=bloque,
-                timeframe=TimeFrame(
-                    5,
-                    TimeFrameUnit.Minute,
-                ),
-                start=inicio,
-                end=ahora,
-            )
-
-            datos = (
-                cliente_datos_crypto
-                .get_crypto_bars(
-                    request
-                )
-            )
-
-            df = datos.df.copy()
-
-            if df is None or df.empty:
-
-                log.warning(
-                    "[crypto] Lote sin datos: "
-                    f"{len(bloque)} símbolos."
-                )
-
-                continue
-
-            # =================================================
-            # MULTIINDEX
-            # =================================================
-
-            if isinstance(
-                df.index,
-                pd.MultiIndex,
-            ):
-
-                nombres = list(
-                    df.index.names
-                )
-
-                if "symbol" in nombres:
-
-                    for simbolo, grupo in (
-                        df.groupby(
-                            level="symbol"
-                        )
-                    ):
-
-                        grupo = grupo.copy()
-
-                        try:
-
-                            grupo = (
-                                grupo.droplevel(
-                                    "symbol"
-                                )
-                            )
-
-                        except Exception:
-                            pass
-
-                        grupo = (
-                            _limpiar_dataframe_crypto(
-                                grupo
-                            )
-                        )
-
-                        if grupo.empty:
-                            continue
-
-                        simbolo_normalizado = (
-                            normalizar_ticker_crypto(
-                                simbolo
-                            )
-                        )
-
-                        resultado[
-                            simbolo_normalizado
-                        ] = grupo
-
-                else:
-
-                    # Fallback
-                    df = df.reset_index()
-
-                    if "symbol" in df.columns:
-
-                        for simbolo, grupo in (
-                            df.groupby(
-                                "symbol"
-                            )
-                        ):
-
-                            grupo = (
-                                grupo
-                                .drop(
-                                    columns=[
-                                        "symbol"
-                                    ],
-                                    errors="ignore",
-                                )
-                            )
-
-                            if (
-                                "timestamp"
-                                in grupo.columns
-                            ):
-
-                                grupo = (
-                                    grupo.set_index(
-                                        "timestamp"
-                                    )
-                                )
-
-                            grupo = (
-                                _limpiar_dataframe_crypto(
-                                    grupo
-                                )
-                            )
-
-                            if grupo.empty:
-                                continue
-
-                            simbolo_normalizado = (
-                                normalizar_ticker_crypto(
-                                    simbolo
-                                )
-                            )
-
-                            resultado[
-                                simbolo_normalizado
-                            ] = grupo
-
-            # =================================================
-            # DATAFRAME SIMPLE
-            # =================================================
-
-            else:
-
-                if len(bloque) == 1:
-
-                    ticker = bloque[0]
-
-                    df = (
-                        _limpiar_dataframe_crypto(
-                            df
-                        )
-                    )
-
-                    if not df.empty:
-
-                        resultado[
-                            ticker
-                        ] = df
-
-        except Exception as e:
-
-            log.error(
-                "[crypto] Error obteniendo "
-                f"lote de {len(bloque)} símbolos: "
-                f"{e}"
-            )
-
-    log.info(
-        "[crypto] Datos recibidos: "
-        f"{len(resultado)}/"
-        f"{len(tickers_normalizados)} cryptos."
-    )
-
-    return resultado
-
-
-# ============================================================
-# MERCADO
-# ============================================================
-
-def mercado_abierto():
+def mercado_abierto() -> bool:
 
     try:
 
         reloj = (
-            cliente_trading
-            .get_clock()
+            cliente_trading.get_clock()
         )
 
         return bool(
@@ -767,7 +865,7 @@ def mercado_abierto():
 
 
 # ============================================================
-# DATOS DE MERCADO INDIVIDUALES
+# DATOS DE UN TICKER
 # ============================================================
 
 def obtener_datos(
@@ -790,7 +888,9 @@ def obtener_datos(
 
             inicio = (
                 ahora
-                - timedelta(days=7)
+                - timedelta(
+                    days=7
+                )
             )
 
             request = CryptoBarsRequest(
@@ -804,8 +904,7 @@ def obtener_datos(
             )
 
             datos = (
-                cliente_datos_crypto
-                .get_crypto_bars(
+                cliente_datos_crypto.get_crypto_bars(
                     request
                 )
             )
@@ -814,7 +913,9 @@ def obtener_datos(
 
             inicio = (
                 ahora
-                - timedelta(days=30)
+                - timedelta(
+                    days=30
+                )
             )
 
             request = StockBarsRequest(
@@ -829,8 +930,7 @@ def obtener_datos(
             )
 
             datos = (
-                cliente_datos_acciones
-                .get_stock_bars(
+                cliente_datos_acciones.get_stock_bars(
                     request
                 )
             )
@@ -840,10 +940,15 @@ def obtener_datos(
         if df is None or df.empty:
 
             log.warning(
-                f"{ticker}: no se recibieron datos."
+                f"{ticker}: no se recibieron "
+                "datos."
             )
 
             return pd.DataFrame()
+
+        # ----------------------------------------------------
+        # MULTIINDEX
+        # ----------------------------------------------------
 
         if isinstance(
             df.index,
@@ -852,15 +957,34 @@ def obtener_datos(
 
             if "symbol" in df.index.names:
 
-                df = df.reset_index(
-                    level="symbol",
-                    drop=True,
+                simbolos = (
+                    df.index
+                    .get_level_values(
+                        "symbol"
+                    )
+                    .unique()
+                    .tolist()
                 )
+
+                # Normalmente aquí solo
+                # tenemos un ticker.
+
+                if len(simbolos) > 0:
+
+                    df = (
+                        df.xs(
+                            simbolos[0],
+                            level="symbol",
+                        )
+                        .copy()
+                    )
 
             else:
 
-                df = df.reset_index(
-                    drop=True
+                df = (
+                    df.reset_index(
+                        drop=True
+                    )
                 )
 
         columnas = [
@@ -919,7 +1043,7 @@ def obtener_datos(
 
 
 # ============================================================
-# POSICIONES
+# OBTENER POSICIÓN
 # ============================================================
 
 def obtener_posicion(
@@ -945,8 +1069,7 @@ def obtener_posicion(
             )
 
             posicion = (
-                cliente_trading
-                .get_open_position(
+                cliente_trading.get_open_position(
                     simbolo_directo
                 )
             )
@@ -960,8 +1083,7 @@ def obtener_posicion(
             pass
 
         posiciones = (
-            cliente_trading
-            .get_all_positions()
+            cliente_trading.get_all_positions()
         )
 
         for posicion in posiciones:
@@ -993,13 +1115,16 @@ def obtener_posicion(
         return None
 
 
+# ============================================================
+# TODAS LAS POSICIONES
+# ============================================================
+
 def obtener_todas_las_posiciones():
 
     try:
 
         return (
-            cliente_trading
-            .get_all_positions()
+            cliente_trading.get_all_positions()
         )
 
     except Exception as e:
@@ -1012,27 +1137,38 @@ def obtener_todas_las_posiciones():
         return []
 
 
+# ============================================================
+# POSICIÓN ABIERTA
+# ============================================================
+
 def tiene_posicion_abierta(
     ticker: str,
 ) -> bool:
 
-    posicion = obtener_posicion(
-        ticker
+    posicion = (
+        obtener_posicion(
+            ticker
+        )
     )
 
     return posicion is not None
 
+
+# ============================================================
+# CONTAR POSICIONES
+# ============================================================
 
 def contar_posiciones_abiertas() -> int:
 
     try:
 
         posiciones = (
-            cliente_trading
-            .get_all_positions()
+            cliente_trading.get_all_positions()
         )
 
-        return len(posiciones)
+        return len(
+            posiciones
+        )
 
     except Exception as e:
 
@@ -1045,7 +1181,7 @@ def contar_posiciones_abiertas() -> int:
 
 
 # ============================================================
-# CUENTA PRINCIPAL
+# RESUMEN CUENTA PRINCIPAL
 # ============================================================
 
 def obtener_resumen_cuenta():
@@ -1053,8 +1189,7 @@ def obtener_resumen_cuenta():
     try:
 
         cuenta = (
-            cliente_trading
-            .get_account()
+            cliente_trading.get_account()
         )
 
         equity = float(
@@ -1099,8 +1234,7 @@ def obtener_resumen_cuenta():
         )
 
         posiciones = (
-            cliente_trading
-            .get_all_positions()
+            cliente_trading.get_all_positions()
         )
 
         beneficio_posiciones = 0.0
@@ -1137,13 +1271,16 @@ def obtener_resumen_cuenta():
         return None
 
 
+# ============================================================
+# POSICIONES TELEGRAM PRINCIPAL
+# ============================================================
+
 def obtener_posiciones_telegram():
 
     try:
 
         posiciones = (
-            cliente_trading
-            .get_all_positions()
+            cliente_trading.get_all_positions()
         )
 
         resultado = []
@@ -1224,12 +1361,15 @@ def obtener_posiciones_telegram():
 
 
 # ============================================================
-# SEGUNDA CUENTA — SOLO LECTURA
+# RESUMEN SEGUNDA CUENTA
 # ============================================================
 
 def obtener_resumen_cuenta_secundaria():
 
-    if cliente_trading_secundaria is None:
+    if (
+        cliente_trading_secundaria
+        is None
+    ):
 
         log.error(
             "[segunda cuenta] Credenciales "
@@ -1241,8 +1381,7 @@ def obtener_resumen_cuenta_secundaria():
     try:
 
         cuenta = (
-            cliente_trading_secundaria
-            .get_account()
+            cliente_trading_secundaria.get_account()
         )
 
         equity = float(
@@ -1331,9 +1470,16 @@ def obtener_resumen_cuenta_secundaria():
         return None
 
 
+# ============================================================
+# POSICIONES SEGUNDA CUENTA
+# ============================================================
+
 def obtener_posiciones_secundaria():
 
-    if cliente_trading_secundaria is None:
+    if (
+        cliente_trading_secundaria
+        is None
+    ):
 
         log.error(
             "[segunda cuenta] Credenciales "
@@ -1444,8 +1590,7 @@ def obtener_ordenes_abiertas():
         )
 
         return (
-            cliente_trading
-            .get_orders(
+            cliente_trading.get_orders(
                 filter=request
             )
         )
@@ -1459,6 +1604,10 @@ def obtener_ordenes_abiertas():
 
         return []
 
+
+# ============================================================
+# ÓRDENES DE UN TICKER
+# ============================================================
 
 def obtener_ordenes_ticker(
     ticker: str,
@@ -1510,7 +1659,7 @@ def obtener_ordenes_ticker(
 
 
 # ============================================================
-# ANALIZAR PROTECCIÓN
+# ANALIZAR ORDEN DE PROTECCIÓN
 # ============================================================
 
 def _analizar_orden_proteccion(
@@ -1602,6 +1751,7 @@ def _analizar_orden_proteccion(
                 ).lower()
 
                 if "sell" not in leg_side:
+
                     continue
 
                 leg_type = str(
@@ -1625,16 +1775,14 @@ def _analizar_orden_proteccion(
                 )
 
                 if (
-                    leg_stop_price
-                    is not None
+                    leg_stop_price is not None
                     or "stop" in leg_type
                 ):
 
                     tiene_sl = True
 
                 if (
-                    leg_limit_price
-                    is not None
+                    leg_limit_price is not None
                     or "limit" in leg_type
                 ):
 
@@ -1654,6 +1802,10 @@ def _analizar_orden_proteccion(
 
         return False, False
 
+
+# ============================================================
+# ANALIZAR PROTECCIÓN
+# ============================================================
 
 def analizar_proteccion(
     ticker: str,
@@ -1711,16 +1863,17 @@ def analizar_proteccion(
             "tiene_proteccion"
         ] = (
             resultado["tiene_sl"]
-            and
-            resultado["tiene_tp"]
+            and resultado["tiene_tp"]
         )
 
         log.info(
-            f"{ticker}: análisis "
-            "protección → "
-            f"SL={'✅' if resultado['tiene_sl'] else '❌'} "
-            f"TP={'✅' if resultado['tiene_tp'] else '❌'} "
-            f"COMPLETA={'✅' if resultado['tiene_proteccion'] else '❌'}"
+            f"{ticker}: análisis protección → "
+            f"SL="
+            f"{'✅' if resultado['tiene_sl'] else '❌'} "
+            f"TP="
+            f"{'✅' if resultado['tiene_tp'] else '❌'} "
+            f"COMPLETA="
+            f"{'✅' if resultado['tiene_proteccion'] else '❌'}"
         )
 
         return resultado
@@ -1734,6 +1887,10 @@ def analizar_proteccion(
 
         return resultado
 
+
+# ============================================================
+# TIENE PROTECCIÓN
+# ============================================================
 
 def tiene_proteccion(
     ticker: str,
@@ -1813,17 +1970,13 @@ def cancelar_protecciones(
                 if (
                     "not found"
                     in error
-                    or
-                    "already canceled"
+                    or "already canceled"
                     in error
-                    or
-                    "already cancelled"
+                    or "already cancelled"
                     in error
-                    or
-                    "cancelled"
+                    or "cancelled"
                     in error
-                    or
-                    "canceled"
+                    or "canceled"
                     in error
                 ):
 
@@ -1850,7 +2003,7 @@ def cancelar_protecciones(
 
 
 # ============================================================
-# PROTECCIÓN ACCIONES
+# PROTEGER ACCIÓN
 # ============================================================
 
 def proteger_posicion(
@@ -1860,14 +2013,17 @@ def proteger_posicion(
 
     try:
 
-        # Las cryptos tienen gestión propia
-        # desde main.py.
+        # Crypto utiliza protección
+        # gestionada desde main.py.
+
         if es_cripto(ticker):
 
             return None
 
-        posicion = obtener_posicion(
-            ticker
+        posicion = (
+            obtener_posicion(
+                ticker
+            )
         )
 
         if posicion is None:
@@ -1909,8 +2065,7 @@ def proteger_posicion(
 
         if (
             analisis["tiene_sl"]
-            or
-            analisis["tiene_tp"]
+            or analisis["tiene_tp"]
         ):
 
             log.warning(
@@ -1939,8 +2094,7 @@ def proteger_posicion(
 
         if (
             cantidad <= 0
-            or
-            precio_entrada <= 0
+            or precio_entrada <= 0
         ):
 
             log.warning(
@@ -1952,7 +2106,6 @@ def proteger_posicion(
         distancia_stop = max(
             atr_actual
             * config.ATR_STOP_MULTIPLICADOR,
-
             precio_entrada
             * config.STOP_LOSS_PCT,
         )
@@ -1965,7 +2118,6 @@ def proteger_posicion(
         distancia_take = max(
             atr_actual
             * config.ATR_TAKE_PROFIT_MULTIPLICADOR,
-
             precio_entrada
             * config.TAKE_PROFIT_PCT,
         )
@@ -2016,8 +2168,7 @@ def proteger_posicion(
         )
 
         resultado = (
-            cliente_trading
-            .submit_order(
+            cliente_trading.submit_order(
                 order_data=orden
             )
         )
@@ -2068,8 +2219,7 @@ def calcular_tamano_posicion(
             return 0
 
         cuenta = (
-            cliente_trading
-            .get_account()
+            cliente_trading.get_account()
         )
 
         equity = float(
@@ -2080,15 +2230,36 @@ def calcular_tamano_posicion(
             cuenta.buying_power
         )
 
+        # ----------------------------------------------------
+        # RIESGO
+        # ----------------------------------------------------
+
+        if es_cripto(ticker):
+
+            riesgo_pct = getattr(
+                config,
+                "CRYPTO_RISK_PER_TRADE_PCT",
+                0.01,
+            )
+
+        else:
+
+            riesgo_pct = (
+                config.RISK_PER_TRADE_PCT
+            )
+
         riesgo_dolares = (
             equity
-            * config.RISK_PER_TRADE_PCT
+            * riesgo_pct
         )
+
+        # ----------------------------------------------------
+        # DISTANCIA STOP
+        # ----------------------------------------------------
 
         distancia_stop = max(
             atr
             * config.ATR_STOP_MULTIPLICADOR,
-
             precio
             * config.STOP_LOSS_PCT,
         )
@@ -2102,16 +2273,24 @@ def calcular_tamano_posicion(
             / distancia_stop
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # CRYPTO
-        # ====================================================
+        # ----------------------------------------------------
 
         if es_cripto(ticker):
 
+            max_notional_pct = getattr(
+                config,
+                "CRYPTO_MAX_NOTIONAL_PCT",
+                0.10,
+            )
+
             max_notional = min(
-                equity * 0.10,
+                equity
+                * max_notional_pct,
                 200000,
-                buying_power * 0.90,
+                buying_power
+                * 0.90,
             )
 
             cantidad_maxima = (
@@ -2124,14 +2303,19 @@ def calcular_tamano_posicion(
                 cantidad_maxima,
             )
 
-            return round(
+            # Alpaca permite fracciones
+            # en crypto.
+
+            cantidad = round(
                 cantidad,
                 6,
             )
 
-        # ====================================================
+            return cantidad
+
+        # ----------------------------------------------------
         # ACCIONES
-        # ====================================================
+        # ----------------------------------------------------
 
         max_notional = (
             buying_power
@@ -2213,8 +2397,7 @@ def comprar(
         )
 
         resultado = (
-            cliente_trading
-            .submit_order(
+            cliente_trading.submit_order(
                 order_data=orden
             )
         )
@@ -2225,7 +2408,8 @@ def comprar(
             f"{ticker} | "
             f"{'5M' if es_cripto(ticker) else '15M'}\n"
             f"Cantidad: {cantidad}\n"
-            f"Precio estimado: ${precio:.2f}"
+            f"Precio estimado: "
+            f"${precio:.6f}"
         )
 
         log.info(
@@ -2254,8 +2438,10 @@ def vender(
 
     try:
 
-        posicion = obtener_posicion(
-            ticker
+        posicion = (
+            obtener_posicion(
+                ticker
+            )
         )
 
         if posicion is None:
@@ -2307,8 +2493,7 @@ def vender(
         )
 
         resultado = (
-            cliente_trading
-            .submit_order(
+            cliente_trading.submit_order(
                 order_data=orden
             )
         )
@@ -2338,7 +2523,7 @@ def vender(
 
 
 # ============================================================
-# PÉRDIDA NO REALIZADA
+# PÉRDIDA / GANANCIA
 # ============================================================
 
 def perdida_pct_no_realizada(
@@ -2347,8 +2532,10 @@ def perdida_pct_no_realizada(
 
     try:
 
-        posicion = obtener_posicion(
-            ticker
+        posicion = (
+            obtener_posicion(
+                ticker
+            )
         )
 
         if posicion is None:
@@ -2383,7 +2570,7 @@ def perdida_pct_no_realizada(
 
 
 # ============================================================
-# PRECIO ACTUAL DE POSICIÓN
+# PRECIO POSICIÓN
 # ============================================================
 
 def precio_actual_posicion(
@@ -2392,8 +2579,10 @@ def precio_actual_posicion(
 
     try:
 
-        posicion = obtener_posicion(
-            ticker
+        posicion = (
+            obtener_posicion(
+                ticker
+            )
         )
 
         if posicion is None:
@@ -2432,6 +2621,10 @@ _ordenes_notificadas = set()
 _inicio_monitor_ejecuciones = None
 
 
+# ============================================================
+# ÓRDENES EJECUTADAS
+# ============================================================
+
 def obtener_ordenes_ejecutadas():
 
     try:
@@ -2442,8 +2635,7 @@ def obtener_ordenes_ejecutadas():
         )
 
         ordenes = (
-            cliente_trading
-            .get_orders(
+            cliente_trading.get_orders(
                 filter=request
             )
         )
@@ -2465,6 +2657,10 @@ def obtener_ordenes_ejecutadas():
         return []
 
 
+# ============================================================
+# FECHA EJECUCIÓN
+# ============================================================
+
 def _obtener_fecha_ejecucion(
     orden,
 ):
@@ -2482,6 +2678,7 @@ def _obtener_fecha_ejecucion(
         )
 
         if valor is None:
+
             continue
 
         try:
@@ -2495,23 +2692,17 @@ def _obtener_fecha_ejecucion(
 
             else:
 
-                fecha = (
-                    datetime.fromisoformat(
-                        str(
-                            valor
-                        ).replace(
-                            "Z",
-                            "+00:00",
-                        )
+                fecha = datetime.fromisoformat(
+                    str(valor).replace(
+                        "Z",
+                        "+00:00",
                     )
                 )
 
             if fecha.tzinfo is None:
 
-                fecha = (
-                    fecha.replace(
-                        tzinfo=timezone.utc
-                    )
+                fecha = fecha.replace(
+                    tzinfo=timezone.utc
                 )
 
             return fecha.astimezone(
@@ -2524,6 +2715,10 @@ def _obtener_fecha_ejecucion(
 
     return None
 
+
+# ============================================================
+# INICIALIZAR MONITOR
+# ============================================================
 
 def inicializar_monitor_ejecuciones():
 
@@ -2555,6 +2750,7 @@ def inicializar_monitor_ejecuciones():
             )
 
             if not order_id:
+
                 continue
 
             fecha_ejecucion = (
@@ -2565,8 +2761,7 @@ def inicializar_monitor_ejecuciones():
 
             if (
                 fecha_ejecucion is None
-                or
-                fecha_ejecucion
+                or fecha_ejecucion
                 <= _inicio_monitor_ejecuciones
             ):
 
@@ -2578,7 +2773,7 @@ def inicializar_monitor_ejecuciones():
 
         log.info(
             "[ejecuciones] Monitor "
-            f"inicializado. {antiguas} "
+            f" inicializado. {antiguas} "
             "órdenes antiguas ignoradas."
         )
 
@@ -2595,6 +2790,10 @@ def inicializar_monitor_ejecuciones():
             f"inicializando monitor: {e}"
         )
 
+
+# ============================================================
+# DETECTAR EJECUCIONES
+# ============================================================
 
 def detectar_ejecuciones():
 
@@ -2632,6 +2831,7 @@ def detectar_ejecuciones():
             )
 
             if not order_id:
+
                 continue
 
             if (
@@ -2665,8 +2865,7 @@ def detectar_ejecuciones():
 
             if (
                 fecha_ejecucion is None
-                or
-                fecha_ejecucion
+                or fecha_ejecucion
                 <= _inicio_monitor_ejecuciones
             ):
 
@@ -2740,8 +2939,7 @@ def detectar_ejecuciones():
             tipo = (
                 "₿ CRIPTO | 5M"
                 if es_cripto(ticker)
-                else
-                "📈 ACCIÓN | 15M"
+                else "📈 ACCIÓN | 15M"
             )
 
             log.info(
@@ -2750,7 +2948,8 @@ def detectar_ejecuciones():
                 f"{ticker} | "
                 f"{accion} | "
                 f"ID={order_id} | "
-                f"Hora={fecha_ejecucion.isoformat()}"
+                f"Hora="
+                f"{fecha_ejecucion.isoformat()}"
             )
 
             if precio is not None:
@@ -2758,13 +2957,15 @@ def detectar_ejecuciones():
                 try:
 
                     precio_formateado = (
-                        f"${float(precio):.2f}"
+                        f"${float(precio):.6f}"
+                        if es_cripto(ticker)
+                        else f"${float(precio):.2f}"
                     )
 
                 except Exception:
 
-                    precio_formateado = str(
-                        precio
+                    precio_formateado = (
+                        str(precio)
                     )
 
                 mensaje = (
@@ -2801,8 +3002,8 @@ def detectar_ejecuciones():
     except Exception as e:
 
         log.error(
-            "[ejecuciones] Error detectando "
-            f"ejecuciones: {e}"
+            "[ejecuciones] Error "
+            f"detectando ejecuciones: {e}"
         )
 
     return nuevas
