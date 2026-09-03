@@ -1887,3 +1887,100 @@ def detectar_ejecuciones():
         )
 
     return nuevas
+    # ============================================================
+# COMANDOS TELEGRAM
+# ============================================================
+
+def procesar_comando_telegram(comando):
+
+    if comando == "/saldo":
+
+        datos = broker.obtener_resumen_cuenta()
+
+        if not datos:
+            return "❌ No se pudo obtener el saldo."
+
+        beneficio = datos["beneficio_dia"]
+
+        emoji = "🟢" if beneficio >= 0 else "🔴"
+
+        return (
+            "💰 SALDO DE LA CUENTA\n\n"
+            f"Capital total: ${datos['equity']:,.2f}\n"
+            f"Disponible: ${datos['cash']:,.2f}\n"
+            f"Buying Power: ${datos['buying_power']:,.2f}\n\n"
+            "📊 RESULTADO DEL DÍA\n"
+            f"{emoji} ${beneficio:+,.2f}\n\n"
+            "📈 POSICIONES\n"
+            f"{datos['numero_posiciones']}"
+        )
+
+    if comando == "/posiciones":
+
+        posiciones = broker.obtener_posiciones_telegram()
+
+        if not posiciones:
+            return (
+                "📭 No hay posiciones abiertas."
+            )
+
+        mensaje = "📊 POSICIONES ABIERTAS\n\n"
+
+        for p in posiciones:
+
+            emoji = (
+                "🟢"
+                if p["beneficio"] >= 0
+                else "🔴"
+            )
+
+            mensaje += (
+                f"{emoji} {p['simbolo']}\n"
+                f"Cantidad: {p['cantidad']}\n"
+                f"Entrada: ${p['entrada']:.2f}\n"
+                f"Actual: ${p['actual']:.2f}\n"
+                f"P/L: ${p['beneficio']:+,.2f} "
+                f"({p['beneficio_pct']:+.2f}%)\n\n"
+            )
+
+        return mensaje
+
+    if comando == "/estado":
+
+        datos = broker.obtener_resumen_cuenta()
+
+        if not datos:
+            return "❌ No se pudo obtener el estado."
+
+        beneficio = datos["beneficio_dia"]
+
+        emoji = "🟢" if beneficio >= 0 else "🔴"
+
+        return (
+            "📊 ESTADO DEL BOT\n\n"
+            f"{emoji} Resultado del día: "
+            f"${beneficio:+,.2f}\n"
+            f"💰 Equity: ${datos['equity']:,.2f}\n"
+            f"📈 Posiciones: "
+            f"{datos['numero_posiciones']}\n"
+            f"🤖 {config.BOT_NOMBRE}"
+        )
+
+    if comando == "/start" or comando == "/help":
+
+        return (
+            "🤖 COMANDOS DISPONIBLES\n\n"
+            "/saldo — saldo y resultado del día\n"
+            "/posiciones — posiciones abiertas\n"
+            "/estado — estado general del bot"
+        )
+
+    return (
+        "❓ Comando no reconocido.\n\n"
+        "Usa /help para ver los comandos."
+    )
+
+
+notificaciones.iniciar_comandos(
+    procesar_comando_telegram
+)
