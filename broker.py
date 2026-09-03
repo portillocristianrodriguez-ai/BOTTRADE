@@ -17,6 +17,7 @@ import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
+    LimitOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
     GetOrdersRequest,
@@ -98,6 +99,7 @@ def mercado_abierto() -> bool:
     """
 
     try:
+
         reloj = cliente_trading.get_clock()
 
         return bool(reloj.is_open)
@@ -169,8 +171,6 @@ def obtener_datos(ticker: str) -> pd.DataFrame:
 
         else:
 
-            # Más de 200 días para que EMA 200
-            # tenga suficiente información.
             inicio = ahora - timedelta(
                 days=500
             )
@@ -181,12 +181,6 @@ def obtener_datos(ticker: str) -> pd.DataFrame:
                 start=inicio,
                 end=ahora,
                 limit=300,
-
-                # IMPORTANTE:
-                # La cuenta actual no tiene acceso
-                # al feed SIP reciente.
-                # IEX es el feed disponible sin
-                # suscripción SIP.
                 feed=DataFeed.IEX,
             )
 
@@ -435,19 +429,102 @@ def obtener_ordenes_abiertas():
 
 
 # =========================================================
-# PROTECCIÓN
+# IDENTIFICACIÓN DE PROTECCIONES
 # =========================================================
 
-def tiene_proteccion(
-    ticker: str
-) -> bool:
+def _es_orden_proteccion(orden) -> bool:
     """
-    Comprueba si una posición de acciones
-    ya tiene protección activa.
+    Determina si una orden SELL parece ser una
+    protección SL/TP del bot.
 
-    Busca órdenes SELL asociadas al ticker
-    con OCO/BRACKET o stop/take-profit.
+    No considera automáticamente cualquier SELL
+    como protección.
     """
+
+    try:
+
+        lado = getattr(
+            orden,
+            "side",
+            None,
+        )
+
+        if lado != OrderSide.SELL:
+
+            return False
+
+        order_class = getattr(
+            orden,
+            "order_class",
+            None,
+        )
+
+        if order_class in (
+            OrderClass.OCO,
+            OrderClass.BRACKET,
+        ):
+
+            return True
+
+        stop_loss = getattr(
+            orden,
+            "stop_loss",
+            None,
+        )
+
+        if stop_loss is not None:
+
+            return True
+
+        take_profit = getattr(
+            orden,
+            "take_profit",
+            None,
+        )
+
+        if take_profit is not None:
+
+            return True
+
+        stop_price = getattr(
+            orden,
+            "stop_price",
+            None,
+        )
+
+        if stop_price is not None:
+
+            return True
+
+        return False
+
+    except Exception:
+
+        return False
+
+
+# =========================================================
+# ANALIZAR PROTECCIÓN
+# =========================================================
+
+def analizar_proteccion(
+    ticker: str
+) -> tuple[bool, bool]:
+    """
+    Analiza la protección de una posición.
+
+    Devuelve:
+
+        (tiene_stop_loss, tiene_take_profit)
+
+    La protección completa requiere:
+
+        SL = True
+        TP = True
+    """
+
+    tiene_sl = False
+    tiene_tp = False
 
     try:
 
@@ -455,77 +532,133 @@ def tiene_proteccion(
 
         for orden in ordenes:
 
-            try:
-
-                simbolo = str(
-                    getattr(
-                        orden,
-                        "symbol",
-                        "",
-                    )
-                ).upper()
-
-                if simbolo != ticker.upper():
-
-                    continue
-
-                lado = getattr(
+            simbolo = str(
+                getattr(
                     orden,
-                    "side",
-                    None,
+                    "symbol",
+                    "",
                 )
+            ).upper()
 
-                if lado != OrderSide.SELL:
-
-                    continue
-
-                order_class = getattr(
-                    orden,
-                    "order_class",
-                    None,
-                )
-
-                if order_class in (
-                    OrderClass.OCO,
-                    OrderClass.BRACKET,
-                ):
-
-                    return True
-
-                stop_loss = getattr(
-                    orden,
-                    "stop_loss",
-                    None,
-                )
-
-                take_profit = getattr(
-                    orden,
-                    "take_profit",
-                    None,
-                )
-
-                if (
-                    stop_loss is not None
-                    or take_profit is not None
-                ):
-
-                    return True
-
-                stop_price = getattr(
-                    orden,
-                    "stop_price",
-                    None,
-                )
-
-                if stop_price is not None:
-
-                    return True
-
-            except Exception:
+            if simbolo != ticker.upper():
 
                 continue
 
-        return False
+            if not _es_orden_proteccion(
+                orden
+            ):
+
+                continue
+
+            order_class = getattr(
+                orden,
+                "order_class",
+                None,
+            )
+
+            stop_loss = getattr(
+                orden,
+                "stop_loss",
+                None,
+            )
+
+            take_profit = getattr(
+                orden,
+                "take_profit",
+                None,
+            )
+
+            stop_price = getattr(
+                orden,
+                "stop_price",
+                None,
+            )
+
+            limit_price = getattr(
+                orden,
+                "limit_price",
+                None,
+            )
+
+            # -------------------------------------------------
+            # OCO / BRACKET
+            # -------------------------------------------------
+
+            if order_class in (
+                OrderClass.OCO,
+                OrderClass.BRACKET,
+            ):
+
+                if (
+                    stop_loss is not None
+                    or stop_price is not None
+                ):
+
+                    tiene_sl = True
+
+                if (
+                    take_profit is not None
+                    or limit_price is not None
+                ):
+
+                    tiene_tp = True
+
+            # -------------------------------------------------
+            # ORDEN STOP INDIVIDUAL
+            # -------------------------------------------------
+
+            elif (
+                stop_loss is not None
+                or stop_price is not None
+            ):
+
+                tiene_sl = True
+
+            # -------------------------------------------------
+            # TAKE PROFIT INDIVIDUAL
+            # -------------------------------------------------
+
+            elif take_profit is not None:
+
+                tiene_tp = True
+
+            # Una orden limit SELL normal sin
+            # relación de protección NO se considera TP.
+
+        return tiene_sl, tiene_tp
+
+    except Exception as e:
+
+        log.error(
+            f"{ticker}: error analizando "
+            f"protección: {e}"
+        )
+
+        return False, False
+
+
+def tiene_proteccion(
+    ticker: str
+) -> bool:
+    """
+    Devuelve True únicamente cuando existe
+    protección completa:
+
+        SL + TP
+    """
+
+    try:
+
+        tiene_sl, tiene_tp = (
+            analizar_proteccion(
+                ticker
+            )
+        )
+
+        return (
+            tiene_sl
+            and tiene_tp
+        )
 
     except Exception as e:
 
@@ -537,6 +670,99 @@ def tiene_proteccion(
         return False
 
 
+# =========================================================
+# CANCELAR PROTECCIONES
+# =========================================================
+
+def cancelar_protecciones(
+    ticker: str
+) -> bool:
+    """
+    Cancela únicamente las órdenes SELL que
+    parezcan protecciones SL/TP.
+
+    Devuelve:
+
+        True  -> cancelación correcta
+        False -> hubo algún error
+    """
+
+    correcto = True
+
+    try:
+
+        ordenes = obtener_ordenes_abiertas()
+
+        for orden in ordenes:
+
+            simbolo = str(
+                getattr(
+                    orden,
+                    "symbol",
+                    "",
+                )
+            ).upper()
+
+            if simbolo != ticker.upper():
+
+                continue
+
+            if not _es_orden_proteccion(
+                orden
+            ):
+
+                continue
+
+            order_id = getattr(
+                orden,
+                "id",
+                None,
+            )
+
+            if not order_id:
+
+                continue
+
+            try:
+
+                (
+                    cliente_trading
+                    .cancel_order_by_id(
+                        order_id
+                    )
+                )
+
+                log.info(
+                    f"{ticker}: protección "
+                    f"{order_id} cancelada."
+                )
+
+            except Exception as e:
+
+                correcto = False
+
+                log.warning(
+                    f"{ticker}: no se pudo "
+                    f"cancelar protección "
+                    f"{order_id}: {e}"
+                )
+
+        return correcto
+
+    except Exception as e:
+
+        log.error(
+            f"{ticker}: error cancelando "
+            f"protecciones: {e}"
+        )
+
+        return False
+
+
+# =========================================================
+# PROTECCIÓN
+# =========================================================
+
 def proteger_posicion(
     ticker: str,
     atr_actual: float,
@@ -546,13 +772,24 @@ def proteger_posicion(
     de acciones existente.
 
     No recrea protección si ya existe.
+
+    Si existe una protección incompleta,
+    intenta cancelarla antes de crear una nueva.
     """
 
     try:
 
+        # -------------------------------------------------
+        # CRIPTO
+        # -------------------------------------------------
+
         if es_cripto(ticker):
 
             return None
+
+        # -------------------------------------------------
+        # POSICIÓN
+        # -------------------------------------------------
 
         posicion = obtener_posicion(
             ticker
@@ -562,9 +799,49 @@ def proteger_posicion(
 
             return None
 
-        if tiene_proteccion(ticker):
+        # -------------------------------------------------
+        # PROTECCIÓN EXISTENTE
+        # -------------------------------------------------
+
+        tiene_sl, tiene_tp = (
+            analizar_proteccion(
+                ticker
+            )
+        )
+
+        if tiene_sl and tiene_tp:
 
             return None
+
+        # -------------------------------------------------
+        # PROTECCIÓN INCOMPLETA
+        # -------------------------------------------------
+
+        if tiene_sl or tiene_tp:
+
+            log.warning(
+                f"{ticker}: protección "
+                f"incompleta detectada "
+                f"(SL={tiene_sl}, TP={tiene_tp}). "
+                f"Intentando reemplazarla."
+            )
+
+            if not cancelar_protecciones(
+                ticker
+            ):
+
+                log.error(
+                    f"{ticker}: no se pudo "
+                    f"cancelar completamente "
+                    f"la protección anterior. "
+                    f"No se crea una nueva."
+                )
+
+                return None
+
+        # -------------------------------------------------
+        # DATOS POSICIÓN
+        # -------------------------------------------------
 
         cantidad = float(
             posicion.qty
@@ -598,48 +875,48 @@ def proteger_posicion(
         # DISTANCIAS
         # =================================================
 
-        stop_distance = (
+        distancia_atr_sl = (
             atr_actual
             * config.ATR_STOP_MULTIPLICADOR
         )
 
-        take_distance = (
-            atr_actual
-            * config.ATR_TAKE_PROFIT_MULTIPLICADOR
-        )
-
-        stop_price = (
-            precio_entrada
-            - stop_distance
-        )
-
-        take_price = (
-            precio_entrada
-            + take_distance
-        )
-
-        # =================================================
-        # LIMITES PORCENTUALES
-        # =================================================
-
-        stop_pct_price = (
+        distancia_pct_sl = (
             precio_entrada
             * config.STOP_LOSS_PCT
         )
 
-        take_pct_price = (
+        distancia_sl = max(
+            distancia_atr_sl,
+            distancia_pct_sl,
+        )
+
+        distancia_atr_tp = (
+            atr_actual
+            * config.ATR_TAKE_PROFIT_MULTIPLICADOR
+        )
+
+        distancia_pct_tp = (
             precio_entrada
             * config.TAKE_PROFIT_PCT
         )
 
-        stop_price = min(
-            stop_price,
-            precio_entrada - stop_pct_price,
+        distancia_tp = max(
+            distancia_atr_tp,
+            distancia_pct_tp,
         )
 
-        take_price = max(
-            take_price,
-            precio_entrada + take_pct_price,
+        # =================================================
+        # PRECIOS
+        # =================================================
+
+        stop_price = (
+            precio_entrada
+            - distancia_sl
+        )
+
+        take_price = (
+            precio_entrada
+            + distancia_tp
         )
 
         if stop_price <= 0:
@@ -651,6 +928,10 @@ def proteger_posicion(
 
             return None
 
+        # =================================================
+        # REDONDEO
+        # =================================================
+
         stop_price = round(
             stop_price,
             2,
@@ -661,11 +942,23 @@ def proteger_posicion(
             2,
         )
 
+        if take_price <= stop_price:
+
+            log.error(
+                f"{ticker}: precios de protección "
+                f"inválidos. "
+                f"SL={stop_price} TP={take_price}"
+            )
+
+            return None
+
         # =================================================
         # OCO
         # =================================================
 
-        orden = MarketOrderRequest(
+        # IMPORTANTE:
+        # Alpaca exige LimitOrderRequest para OCO.
+        orden = LimitOrderRequest(
             symbol=ticker,
             qty=round(
                 cantidad,
@@ -720,6 +1013,9 @@ def calcular_tamano_posicion(
     """
     Calcula tamaño según riesgo.
 
+    La distancia utilizada para calcular el tamaño
+    coincide exactamente con la distancia real del SL.
+
     Acciones:
         Posición en unidades enteras.
 
@@ -755,14 +1051,32 @@ def calcular_tamano_posicion(
 
             return 0
 
+        # =================================================
+        # RIESGO
+        # =================================================
+
         riesgo_dolares = (
             equity
             * config.RISK_PER_TRADE_PCT
         )
 
-        distancia_stop = (
+        # =================================================
+        # MISMA DISTANCIA QUE EL SL REAL
+        # =================================================
+
+        distancia_atr_sl = (
             atr
             * config.ATR_STOP_MULTIPLICADOR
+        )
+
+        distancia_pct_sl = (
+            precio
+            * config.STOP_LOSS_PCT
+        )
+
+        distancia_stop = max(
+            distancia_atr_sl,
+            distancia_pct_sl,
         )
 
         if distancia_stop <= 0:
@@ -906,6 +1220,10 @@ def comprar(
 
             return None
 
+        # =================================================
+        # ACCIONES
+        # =================================================
+
         if not es_cripto(ticker):
 
             orden = MarketOrderRequest(
@@ -914,6 +1232,10 @@ def comprar(
                 side=OrderSide.BUY,
                 time_in_force=TimeInForce.DAY,
             )
+
+        # =================================================
+        # CRIPTO
+        # =================================================
 
         else:
 
@@ -973,6 +1295,11 @@ def vender(
 ):
     """
     Cierra la posición completa a mercado.
+
+    Antes de vender acciones:
+        - identifica protecciones
+        - cancela únicamente esas protecciones
+        - ejecuta la venta
     """
 
     try:
@@ -999,72 +1326,14 @@ def vender(
             return None
 
         # =================================================
-        # CANCELAR PROTECCIONES DE ACCIONES
+        # CANCELAR PROTECCIONES
         # =================================================
 
         if not es_cripto(ticker):
 
-            try:
-
-                ordenes = (
-                    obtener_ordenes_abiertas()
-                )
-
-                for orden in ordenes:
-
-                    simbolo = str(
-                        getattr(
-                            orden,
-                            "symbol",
-                            "",
-                        )
-                    ).upper()
-
-                    if simbolo != ticker.upper():
-
-                        continue
-
-                    lado = getattr(
-                        orden,
-                        "side",
-                        None,
-                    )
-
-                    if lado != OrderSide.SELL:
-
-                        continue
-
-                    order_id = getattr(
-                        orden,
-                        "id",
-                        None,
-                    )
-
-                    if order_id:
-
-                        try:
-
-                            (
-                                cliente_trading
-                                .cancel_order_by_id(
-                                    order_id
-                                )
-                            )
-
-                        except Exception as e:
-
-                            log.warning(
-                                f"{ticker}: no se pudo "
-                                f"cancelar protección "
-                                f"{order_id}: {e}"
-                            )
-
-            except Exception as e:
-
-                log.warning(
-                    f"{ticker}: error cancelando "
-                    f"protecciones: {e}"
-                )
+            cancelar_protecciones(
+                ticker
+            )
 
         # =================================================
         # ORDEN DE VENTA
@@ -1253,7 +1522,6 @@ def obtener_ordenes_ejecutadas():
     instalada de alpaca-py no acepta:
 
         get_orders(limit=100)
-
     """
 
     try:
@@ -1333,11 +1601,20 @@ def detectar_ejecuciones():
     """
     Detecta nuevas órdenes ejecutadas.
 
-    Devuelve una lista de mensajes
-    para enviar a Telegram.
+    Devuelve una lista de diccionarios:
+
+        {
+            "mensaje": "...",
+            "ticker": "NVDA",
+            "compra_accion": True/False
+        }
+
+    Esto permite que main.py pueda detectar
+    específicamente una compra de acciones
+    y activar su protección automáticamente.
     """
 
-    mensajes = []
+    resultados = []
 
     try:
 
@@ -1373,7 +1650,10 @@ def detectar_ejecuciones():
                 )
             ).lower()
 
-            # Solo notificar ejecuciones reales.
+            # =================================================
+            # SOLO EJECUCIONES REALES
+            # =================================================
+
             if "filled" not in status:
 
                 _ordenes_notificadas.add(
@@ -1392,7 +1672,7 @@ def detectar_ejecuciones():
                     "symbol",
                     "",
                 )
-            )
+            ).upper()
 
             side = str(
                 getattr(
@@ -1431,7 +1711,7 @@ def detectar_ejecuciones():
                 )
 
             # =================================================
-            # ACCIÓN
+            # TIPO DE ORDEN
             # =================================================
 
             if "buy" in side:
@@ -1484,8 +1764,23 @@ def detectar_ejecuciones():
                 f"precio: {precio_texto}"
             )
 
-            mensajes.append(
-                mensaje
+            es_compra = (
+                "buy" in side
+            )
+
+            es_accion = (
+                not es_cripto(ticker)
+            )
+
+            resultados.append(
+                {
+                    "mensaje": mensaje,
+                    "ticker": ticker,
+                    "compra_accion": (
+                        es_compra
+                        and es_accion
+                    ),
+                }
             )
 
             log.info(
@@ -1499,4 +1794,4 @@ def detectar_ejecuciones():
             f"ejecuciones: {e}"
         )
 
-    return mensajes
+    return resultados
