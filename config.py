@@ -3,26 +3,30 @@ config.py
 
 Configuración central del bot.
 
-Gestiona:
-- Alpaca
-- Acciones
-- Crypto
-- Riesgo
-- Estrategia
-- Scanner crypto 24/7
-- Telegram
+Las claves y secretos se obtienen exclusivamente
+desde las variables de entorno de Railway.
+
+IMPORTANTE:
+- PAPER debe permanecer en true durante las pruebas.
+- La cuenta secundaria es solo lectura.
+- El scanner crypto opera únicamente en la cuenta principal.
 """
 
 import os
 
 
 # ============================================================
-# UTILIDADES
+# FUNCIONES AUXILIARES
 # ============================================================
 
-def _bool(nombre: str, default: bool) -> bool:
+def _bool(
+    nombre: str,
+    default: bool,
+) -> bool:
 
-    valor = os.environ.get(nombre)
+    valor = os.environ.get(
+        nombre
+    )
 
     if valor is None:
         return default
@@ -36,7 +40,10 @@ def _bool(nombre: str, default: bool) -> bool:
     )
 
 
-def _float(nombre: str, default: float) -> float:
+def _float(
+    nombre: str,
+    default: float,
+) -> float:
 
     return float(
         os.environ.get(
@@ -46,7 +53,10 @@ def _float(nombre: str, default: float) -> float:
     )
 
 
-def _int(nombre: str, default: int) -> int:
+def _int(
+    nombre: str,
+    default: int,
+) -> int:
 
     return int(
         os.environ.get(
@@ -81,190 +91,65 @@ PAPER = _bool(
 # ============================================================
 
 TICKERS = [
-    t.strip().upper()
-    for t in os.environ.get(
+    ticker.strip().upper()
+    for ticker in os.environ.get(
         "TICKERS",
         "AAPL,MSFT,NVDA,TSLA,AMZN",
     ).split(",")
-    if t.strip()
+    if ticker.strip()
 ]
 
 
 # ============================================================
-# CRYPTO MANUAL
+# CRYPTO
 # ============================================================
 
+"""
+CRYPTO_TICKERS queda como fallback.
+
+El scanner nuevo NO depende únicamente de esta lista:
+descubre automáticamente los activos crypto USD
+negociables de Alpaca.
+"""
+
 CRYPTO_TICKERS = [
-    t.strip().upper()
-    for t in os.environ.get(
+    ticker.strip().upper()
+    for ticker in os.environ.get(
         "CRYPTO_TICKERS",
         "BTC/USD,ETH/USD,SOL/USD",
     ).split(",")
-    if t.strip()
+    if ticker.strip()
 ]
 
 
 # ============================================================
-# SCANNER CRYPTO 24/7
+# INTERVALOS
 # ============================================================
 
-# Activa el descubrimiento automático de cryptos.
-#
-# TRUE:
-# El bot busca automáticamente las cryptos
-# negociables disponibles en Alpaca.
-#
-# FALSE:
-# Utiliza solamente CRYPTO_TICKERS.
-
-CRYPTO_SCANNER_ENABLED = _bool(
-    "CRYPTO_SCANNER_ENABLED",
-    True,
+# Acciones
+CHECK_INTERVAL_MINUTES = _int(
+    "CHECK_INTERVAL_MINUTES",
+    5,
 )
 
 
-# Cada cuánto se ejecuta el scanner.
-#
-# 5 minutos = coincide con las velas crypto
-# que estamos utilizando actualmente.
-
+# Scanner crypto
 CRYPTO_SCAN_INTERVAL_MINUTES = _int(
     "CRYPTO_SCAN_INTERVAL_MINUTES",
     5,
 )
 
 
-# Número máximo de cryptos que se analizan
-# en cada ciclo.
-
-CRYPTO_MAX_SYMBOLS_SCAN = _int(
-    "CRYPTO_MAX_SYMBOLS_SCAN",
-    100,
-)
-
-
-# Número máximo de candidatos que pasan
-# a la fase de análisis profundo.
-
-CRYPTO_MAX_CANDIDATOS = _int(
-    "CRYPTO_MAX_CANDIDATOS",
-    10,
-)
-
-
-# Puntuación mínima necesaria para considerar
-# una crypto como oportunidad.
-
-CRYPTO_SCORE_MINIMO = _float(
-    "CRYPTO_SCORE_MINIMO",
-    70.0,
+# Protección crypto
+CRYPTO_PROTECTION_INTERVAL_SECONDS = _int(
+    "CRYPTO_PROTECTION_INTERVAL_SECONDS",
+    15,
 )
 
 
 # ============================================================
-# FILTROS DEL SCANNER
+# RIESGO GENERAL — ACCIONES
 # ============================================================
-
-# Volumen relativo mínimo.
-#
-# Ejemplo:
-# 1.50 = volumen actual 50% superior
-# a la media.
-
-CRYPTO_VOLUMEN_MIN_MULTIPLICADOR = _float(
-    "CRYPTO_VOLUMEN_MIN_MULTIPLICADOR",
-    1.50,
-)
-
-
-# RSI mínimo para entrada.
-
-CRYPTO_RSI_MIN = _float(
-    "CRYPTO_RSI_MIN",
-    50.0,
-)
-
-
-# RSI máximo.
-#
-# Evitamos comprar cuando el movimiento
-# ya está excesivamente sobrecalentado.
-
-CRYPTO_RSI_MAX = _float(
-    "CRYPTO_RSI_MAX",
-    68.0,
-)
-
-
-# ============================================================
-# MOMENTUM
-# ============================================================
-
-# Subida máxima permitida durante las últimas
-# velas antes de entrar.
-#
-# Evita perseguir una crypto que ya haya
-# explotado demasiado.
-
-CRYPTO_MAX_SUBIDA_PREVIA_PCT = _float(
-    "CRYPTO_MAX_SUBIDA_PREVIA_PCT",
-    4.0,
-)
-
-
-# Porcentaje mínimo de aceleración necesario
-# para considerar que existe momentum.
-
-CRYPTO_MOMENTUM_MIN_PCT = _float(
-    "CRYPTO_MOMENTUM_MIN_PCT",
-    0.30,
-)
-
-
-# ============================================================
-# ATR / VOLATILIDAD
-# ============================================================
-
-CRYPTO_ATR_MIN_PCT = _float(
-    "CRYPTO_ATR_MIN_PCT",
-    0.003,
-)
-
-
-# ============================================================
-# CONTROL DE ENTRADAS
-# ============================================================
-
-# Evita comprar el mismo símbolo repetidamente
-# después de una salida.
-
-CRYPTO_COOLDOWN_MINUTES = _int(
-    "CRYPTO_COOLDOWN_MINUTES",
-    30,
-)
-
-
-# Máximo de nuevas compras crypto en un solo ciclo.
-
-CRYPTO_MAX_COMPRAS_POR_CICLO = _int(
-    "CRYPTO_MAX_COMPRAS_POR_CICLO",
-    1,
-)
-
-
-# ============================================================
-# RIESGO GENERAL
-# ============================================================
-
-CHECK_INTERVAL_MINUTES = _int(
-    "CHECK_INTERVAL_MINUTES",
-    5,
-)
-
-CRYPTO_CHECK_INTERVAL_MINUTES = _int(
-    "CRYPTO_CHECK_INTERVAL_MINUTES",
-    5,
-)
 
 RISK_PER_TRADE_PCT = _float(
     "RISK_PER_TRADE_PCT",
@@ -303,7 +188,31 @@ MAX_POSICIONES_ABIERTAS = _int(
 
 
 # ============================================================
-# ESTRATEGIA
+# RIESGO CRYPTO
+# ============================================================
+
+"""
+Crypto utiliza un riesgo independiente de las acciones.
+
+1% de equity como riesgo teórico por operación.
+
+Además, ninguna operación crypto podrá superar
+el porcentaje máximo de equity definido abajo.
+"""
+
+CRYPTO_RISK_PER_TRADE_PCT = _float(
+    "CRYPTO_RISK_PER_TRADE_PCT",
+    0.01,
+)
+
+CRYPTO_MAX_NOTIONAL_PCT = _float(
+    "CRYPTO_MAX_NOTIONAL_PCT",
+    0.10,
+)
+
+
+# ============================================================
+# ESTRATEGIA ACCIONES
 # ============================================================
 
 EMA_RAPIDA = _int(
@@ -343,7 +252,7 @@ MARGEN_SALIDA_PCT = _float(
 
 
 # ============================================================
-# ATR / VOLUMEN
+# INDICADORES GENERALES
 # ============================================================
 
 ATR_PERIODO = _int(
@@ -364,6 +273,184 @@ VOLUMEN_SMA_PERIODO = _int(
 VOLUMEN_MIN_MULTIPLICADOR = _float(
     "VOLUMEN_MIN_MULTIPLICADOR",
     1.0,
+)
+
+
+# ============================================================
+# SCANNER CRYPTO
+# ============================================================
+
+"""
+El scanner busca oportunidades de impulso temprano
+en crypto utilizando velas de 5 minutos.
+
+No intenta adivinar el mínimo exacto.
+
+Busca:
+- tendencia
+- aceleración
+- ruptura
+- volumen
+- momentum
+- RSI
+- MACD
+- volatilidad
+"""
+
+
+CRYPTO_SCANNER_ENABLED = _bool(
+    "CRYPTO_SCANNER_ENABLED",
+    True,
+)
+
+
+# ------------------------------------------------------------
+# UNIVERSO
+# ------------------------------------------------------------
+
+# Número máximo de símbolos procesados por ciclo.
+
+CRYPTO_MAX_SYMBOLS_SCAN = _int(
+    "CRYPTO_MAX_SYMBOLS_SCAN",
+    100,
+)
+
+
+# Tiempo durante el cual se conserva
+# el universo descubierto.
+
+CRYPTO_UNIVERSE_REFRESH_MINUTES = _int(
+    "CRYPTO_UNIVERSE_REFRESH_MINUTES",
+    30,
+)
+
+
+# Tamaño de cada petición de datos.
+
+CRYPTO_SCAN_BATCH_SIZE = _int(
+    "CRYPTO_SCAN_BATCH_SIZE",
+    50,
+)
+
+
+# ------------------------------------------------------------
+# FILTROS
+# ------------------------------------------------------------
+
+# Excluir stablecoins.
+
+CRYPTO_EXCLUIR_ESTABLES = _bool(
+    "CRYPTO_EXCLUIR_ESTABLES",
+    True,
+)
+
+
+# Número de mejores candidatos que se
+# conservan después del análisis.
+
+CRYPTO_MAX_CANDIDATOS = _int(
+    "CRYPTO_MAX_CANDIDATOS",
+    10,
+)
+
+
+# ------------------------------------------------------------
+# SCORE
+# ------------------------------------------------------------
+
+CRYPTO_SCORE_MINIMO = _float(
+    "CRYPTO_SCORE_MINIMO",
+    75,
+)
+
+
+# ------------------------------------------------------------
+# COMPRAS
+# ------------------------------------------------------------
+
+# Máximo de nuevas compras crypto por ciclo.
+
+CRYPTO_MAX_COMPRAS_POR_CICLO = _int(
+    "CRYPTO_MAX_COMPRAS_POR_CICLO",
+    1,
+)
+
+
+# Tiempo que debe pasar antes de volver a
+# entrar en el mismo activo después de una operación.
+
+CRYPTO_COOLDOWN_MINUTES = _int(
+    "CRYPTO_COOLDOWN_MINUTES",
+    30,
+)
+
+
+# ------------------------------------------------------------
+# BREAKOUT
+# ------------------------------------------------------------
+
+# Número de velas utilizadas para determinar
+# una ruptura reciente.
+
+CRYPTO_BREAKOUT_LOOKBACK = _int(
+    "CRYPTO_BREAKOUT_LOOKBACK",
+    12,
+)
+
+
+# ------------------------------------------------------------
+# MOMENTUM
+# ------------------------------------------------------------
+
+# Número de velas para medir momentum.
+
+CRYPTO_MOMENTUM_BARS = _int(
+    "CRYPTO_MOMENTUM_BARS",
+    3,
+)
+
+
+# Momentum mínimo requerido.
+
+CRYPTO_MIN_MOMENTUM_PCT = _float(
+    "CRYPTO_MIN_MOMENTUM_PCT",
+    0.30,
+)
+
+
+# Evita comprar después de movimientos
+# demasiado extendidos.
+
+CRYPTO_MAX_RISE_PCT = _float(
+    "CRYPTO_MAX_RISE_PCT",
+    10.0,
+)
+
+
+# ------------------------------------------------------------
+# VOLUMEN
+# ------------------------------------------------------------
+
+# Volumen mínimo respecto a su media.
+
+CRYPTO_VOLUME_MIN_MULTIPLICADOR = _float(
+    "CRYPTO_VOLUME_MIN_MULTIPLICADOR",
+    1.50,
+)
+
+
+# ------------------------------------------------------------
+# RSI
+# ------------------------------------------------------------
+
+CRYPTO_RSI_MIN = _float(
+    "CRYPTO_RSI_MIN",
+    50,
+)
+
+CRYPTO_RSI_MAX = _float(
+    "CRYPTO_RSI_MAX",
+    68,
 )
 
 
@@ -413,6 +500,80 @@ def validar():
         raise RuntimeError(
             "Faltan variables de entorno: "
             f"{', '.join(faltantes)}. "
-            "Configuralas en Railway "
+            "Configúralas en Railway "
             "(Settings -> Variables)."
+        )
+
+    # --------------------------------------------------------
+    # VALIDACIONES DE SEGURIDAD
+    # --------------------------------------------------------
+
+    if (
+        RISK_PER_TRADE_PCT <= 0
+        or RISK_PER_TRADE_PCT > 1
+    ):
+
+        raise RuntimeError(
+            "RISK_PER_TRADE_PCT debe estar "
+            "entre 0 y 1."
+        )
+
+    if (
+        CRYPTO_RISK_PER_TRADE_PCT <= 0
+        or CRYPTO_RISK_PER_TRADE_PCT > 1
+    ):
+
+        raise RuntimeError(
+            "CRYPTO_RISK_PER_TRADE_PCT debe "
+            "estar entre 0 y 1."
+        )
+
+    if (
+        CRYPTO_MAX_NOTIONAL_PCT <= 0
+        or CRYPTO_MAX_NOTIONAL_PCT > 1
+    ):
+
+        raise RuntimeError(
+            "CRYPTO_MAX_NOTIONAL_PCT debe "
+            "estar entre 0 y 1."
+        )
+
+    if (
+        MAX_POSICIONES_ABIERTAS
+        <= 0
+    ):
+
+        raise RuntimeError(
+            "MAX_POSICIONES_ABIERTAS debe "
+            "ser mayor que 0."
+        )
+
+    if (
+        CRYPTO_SCORE_MINIMO < 0
+        or CRYPTO_SCORE_MINIMO > 100
+    ):
+
+        raise RuntimeError(
+            "CRYPTO_SCORE_MINIMO debe "
+            "estar entre 0 y 100."
+        )
+
+    if (
+        CRYPTO_MAX_SYMBOLS_SCAN
+        <= 0
+    ):
+
+        raise RuntimeError(
+            "CRYPTO_MAX_SYMBOLS_SCAN debe "
+            "ser mayor que 0."
+        )
+
+    if (
+        CRYPTO_SCAN_BATCH_SIZE
+        <= 0
+    ):
+
+        raise RuntimeError(
+            "CRYPTO_SCAN_BATCH_SIZE debe "
+            "ser mayor que 0."
         )
