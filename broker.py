@@ -1,612 +1,3031 @@
 """
-Punto de entrada del bot.
 
-Gestiona:
-- Acciones: velas diarias + bracket orders.
-- Posiciones de acciones existentes: protección automática.
-- Cripto: stop-loss + trailing stop manual.
-- Órdenes ejecutadas: avisos por Telegram.
+broker.py
+
+
+
+Todo lo que toca la API de Alpaca:
+
+
+
+- Obtener datos de mercado
+
+- Consultar posiciones
+
+- Ejecutar compras/ventas
+
+- Gestionar protección SL/TP
+
+- Controlar tamaño de posición
+
+- Detectar ejecuciones
+
 """
 
-import time
+
+
 import logging
-import threading
+
+from datetime import datetime, timedelta, timezone
+
+
+
+import pandas as pd
+
+
+
+from alpaca.trading.client import TradingClient
+
+from alpaca.trading.requests import (
+
+    MarketOrderRequest,
+
+    LimitOrderRequest,
+
+    StopLossRequest,
+
+    TakeProfitRequest,
+
+    GetOrdersRequest,
+
+)
+
+from alpaca.trading.enums import (
+
+    OrderSide,
+
+    TimeInForce,
+
+    OrderClass,
+
+    QueryOrderStatus,
+
+)
+
+
+
+from alpaca.data.historical import (
+
+    StockHistoricalDataClient,
+
+    CryptoHistoricalDataClient,
+
+)
+
+from alpaca.data.requests import (
+
+    StockBarsRequest,
+
+    CryptoBarsRequest,
+
+)
+
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+from alpaca.data.enums import DataFeed
+
+
 
 import config
-import broker
-import estrategia
-import notificaciones
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+
+
 
 log = logging.getLogger(__name__)
 
 
-# =========================================================
-# MÁXIMOS DE CRIPTO
-# =========================================================
-
-_maximos_cripto = {}
 
 
-# =========================================================
-# REVISAR TICKER
-# =========================================================
 
-def revisar_ticker(ticker: str):
+# ============================================================
+
+# CLIENTES ALPACA
+
+# ============================================================
+
+
+
+cliente_trading = TradingClient(
+
+    config.API_KEY,
+
+    config.API_SECRET,
+
+    paper=config.PAPER,
+
+)
+
+
+
+cliente_datos_acciones = StockHistoricalDataClient(
+
+    config.API_KEY,
+
+    config.API_SECRET,
+
+)
+
+
+
+cliente_datos_crypto = CryptoHistoricalDataClient(
+
+    config.API_KEY,
+
+    config.API_SECRET,
+
+)
+
+
+
+
+
+# ============================================================
+
+# UTILIDADES
+
+# ============================================================
+
+
+
+def es_cripto(ticker: str) -> bool:
+
+    return "/" in ticker
+
+
+
+
+
+def mercado_abierto() -> bool:
+
+    """
+
+    Comprueba si el mercado de acciones está abierto.
+
+    """
+
+
 
     try:
 
-        df = broker.obtener_datos(
-            ticker
-        )
+        reloj = cliente_trading.get_clock()
 
-        if df.empty:
 
-            log.warning(
-                f"{ticker}: sin datos, se omite."
-            )
 
-            return
+        return bool(reloj.is_open)
 
-        df = estrategia.calcular_indicadores(
-            df
-        )
 
-        senal = estrategia.generar_senal(
-            df
-        )
-
-        actual = df.iloc[-1]
-
-        precio_actual = float(
-            actual["close"]
-        )
-
-        atr_actual = (
-            float(actual["atr"])
-            if not actual.isna().get(
-                "atr",
-                True
-            )
-            else None
-        )
-
-        posicion_abierta = (
-            broker.tiene_posicion_abierta(
-                ticker
-            )
-        )
-
-        log.info(
-            f"{ticker}: "
-            f"precio=${precio_actual:.2f} "
-            f"señal={senal} "
-            f"posición_abierta="
-            f"{posicion_abierta}"
-        )
-
-        # =====================================================
-        # PROTEGER ACCIONES EXISTENTES
-        # =====================================================
-
-        if (
-            posicion_abierta
-            and not broker.es_cripto(ticker)
-            and atr_actual is not None
-        ):
-
-            try:
-
-                mensaje_proteccion = (
-                    broker.proteger_posicion(
-                        ticker,
-                        atr_actual,
-                    )
-                )
-
-                if mensaje_proteccion:
-
-                    notificaciones.notificar(
-                        mensaje_proteccion
-                    )
-
-            except Exception as e:
-
-                log.error(
-                    f"{ticker}: error comprobando "
-                    f"protección: {e}"
-                )
-
-        # =====================================================
-        # CRIPTO
-        # =====================================================
-
-        if (
-            posicion_abierta
-            and broker.es_cripto(ticker)
-        ):
-
-            # -------------------------------------------------
-            # STOP LOSS MANUAL
-            # -------------------------------------------------
-
-            perdida_pct = (
-                broker.perdida_pct_no_realizada(
-                    ticker
-                )
-            )
-
-            if (
-                perdida_pct is not None
-                and perdida_pct
-                <= -config.STOP_LOSS_PCT
-            ):
-
-                log.warning(
-                    f"{ticker}: stop-loss manual "
-                    f"disparado "
-                    f"({perdida_pct:.2%}). "
-                    f"Vendiendo."
-                )
-
-                mensaje = broker.vender(
-                    ticker
-                )
-
-                _maximos_cripto.pop(
-                    ticker,
-                    None,
-                )
-
-                if mensaje:
-
-                    notificaciones.notificar(
-                        f"🛑 STOP-LOSS manual — "
-                        f"{mensaje} "
-                        f"(pérdida: "
-                        f"{perdida_pct:.2%})"
-                    )
-
-                return
-
-            # -------------------------------------------------
-            # TRAILING STOP
-            # -------------------------------------------------
-
-            info_posicion = (
-                broker.precio_actual_posicion(
-                    ticker
-                )
-            )
-
-            if info_posicion is not None:
-
-                (
-                    precio_entrada,
-                    precio_actual_pos,
-                ) = info_posicion
-
-                maximo_previo = (
-                    _maximos_cripto.get(
-                        ticker,
-                        precio_entrada,
-                    )
-                )
-
-                nuevo_maximo = max(
-                    maximo_previo,
-                    precio_actual_pos,
-                )
-
-                _maximos_cripto[ticker] = (
-                    nuevo_maximo
-                )
-
-                retroceso = (
-                    (
-                        nuevo_maximo
-                        - precio_actual_pos
-                    )
-                    / nuevo_maximo
-                    if nuevo_maximo > 0
-                    else 0
-                )
-
-                if (
-                    retroceso
-                    >= config.TRAILING_STOP_PCT
-                ):
-
-                    log.warning(
-                        f"{ticker}: trailing stop "
-                        f"disparado "
-                        f"(retroceso "
-                        f"{retroceso:.2%} "
-                        f"desde "
-                        f"${nuevo_maximo:.2f}). "
-                        f"Vendiendo."
-                    )
-
-                    mensaje = broker.vender(
-                        ticker
-                    )
-
-                    _maximos_cripto.pop(
-                        ticker,
-                        None,
-                    )
-
-                    if mensaje:
-
-                        notificaciones.notificar(
-                            f"📉 TRAILING STOP — "
-                            f"{mensaje} "
-                            f"(retroceso: "
-                            f"{retroceso:.2%})"
-                        )
-
-                    return
-
-        # =====================================================
-        # COMPRA
-        # =====================================================
-
-        if (
-            senal == "COMPRAR"
-            and not posicion_abierta
-        ):
-
-            if atr_actual is None:
-
-                log.warning(
-                    f"{ticker}: ATR no disponible, "
-                    f"se omite compra."
-                )
-
-                return
-
-            if (
-                broker.contar_posiciones_abiertas()
-                >= config.MAX_POSICIONES_ABIERTAS
-            ):
-
-                log.info(
-                    "Máximo de posiciones abiertas "
-                    "alcanzado, se omite compra."
-                )
-
-                return
-
-            mensaje = broker.comprar(
-                ticker,
-                precio_actual,
-                atr_actual,
-            )
-
-            if mensaje:
-
-                notificaciones.notificar(
-                    mensaje
-                )
-
-                if broker.es_cripto(ticker):
-
-                    _maximos_cripto[ticker] = (
-                        precio_actual
-                    )
-
-        # =====================================================
-        # VENTA POR SEÑAL
-        # =====================================================
-
-        elif (
-            senal == "VENDER"
-            and posicion_abierta
-        ):
-
-            mensaje = broker.vender(
-                ticker
-            )
-
-            _maximos_cripto.pop(
-                ticker,
-                None
-            )
-
-            if mensaje:
-
-                notificaciones.notificar(
-                    mensaje
-                )
 
     except Exception as e:
 
+
+
         log.error(
-            f"{ticker}: error general en "
-            f"revisar_ticker: {e}"
+
+            f"[mercado] Error comprobando mercado: {e}"
+
         )
 
 
-# =========================================================
-# LOOP ACCIONES
-# =========================================================
 
-def loop_acciones():
+        return False
 
-    if not config.TICKERS:
-        return
 
-    while True:
 
-        try:
 
-            if broker.mercado_abierto():
 
-                for ticker in config.TICKERS:
+# ============================================================
 
-                    try:
+# DATOS DE MERCADO
 
-                        revisar_ticker(
-                            ticker
-                        )
+# ============================================================
 
-                    except Exception as e:
 
-                        log.error(
-                            f"[acciones] Error "
-                            f"procesando "
-                            f"{ticker}: {e}"
-                        )
+
+def obtener_datos(
+
+    ticker: str,
+
+) -> pd.DataFrame:
+
+
+
+    try:
+
+
+
+        ahora = datetime.now(
+
+            timezone.utc
+
+        )
+
+
+
+        # ====================================================
+
+        # CRIPTO
+
+        # ====================================================
+
+
+
+        if es_cripto(ticker):
+
+
+
+            inicio = (
+
+                ahora
+
+                - timedelta(days=7)
+
+            )
+
+
+
+            request = CryptoBarsRequest(
+
+                symbol_or_symbols=ticker,
+
+                timeframe=TimeFrame(
+
+                    5,
+
+                    TimeFrameUnit.Minute,
+
+                ),
+
+                start=inicio,
+
+                end=ahora,
+
+            )
+
+
+
+            datos = (
+
+                cliente_datos_crypto
+
+                .get_crypto_bars(
+
+                    request
+
+                )
+
+            )
+
+
+
+        # ====================================================
+
+        # ACCIONES
+
+        # ====================================================
+
+
+
+        else:
+
+
+
+            inicio = (
+
+                ahora
+
+                - timedelta(days=30)
+
+            )
+
+
+
+            request = StockBarsRequest(
+
+                symbol_or_symbols=ticker,
+
+                timeframe=TimeFrame(
+
+                    15,
+
+                    TimeFrameUnit.Minute,
+
+                ),
+
+                start=inicio,
+
+                end=ahora,
+
+                feed=DataFeed.IEX,
+
+            )
+
+
+
+            datos = (
+
+                cliente_datos_acciones
+
+                .get_stock_bars(
+
+                    request
+
+                )
+
+            )
+
+
+
+        # ====================================================
+
+        # DATAFRAME
+
+        # ====================================================
+
+
+
+        df = datos.df.copy()
+
+
+
+        if df is None or df.empty:
+
+
+
+            log.warning(
+
+                f"{ticker}: no se recibieron datos."
+
+            )
+
+
+
+            return pd.DataFrame()
+
+
+
+        # ====================================================
+
+        # MULTIINDEX
+
+        # ====================================================
+
+
+
+        if isinstance(
+
+            df.index,
+
+            pd.MultiIndex,
+
+        ):
+
+
+
+            if "symbol" in df.index.names:
+
+
+
+                df = df.reset_index(
+
+                    level="symbol",
+
+                    drop=True,
+
+                )
+
+
 
             else:
 
-                log.info(
-                    "[acciones] Mercado cerrado, "
-                    "se omite este ciclo."
+
+
+                df = df.reset_index(
+
+                    drop=True
+
                 )
 
-        except Exception as e:
 
-            log.error(
-                f"[acciones] Error en el loop: {e}"
+
+        # ====================================================
+
+        # COLUMNAS NECESARIAS
+
+        # ====================================================
+
+
+
+        columnas = [
+
+            "open",
+
+            "high",
+
+            "low",
+
+            "close",
+
+            "volume",
+
+        ]
+
+
+
+        for columna in columnas:
+
+
+
+            if columna not in df.columns:
+
+
+
+                log.warning(
+
+                    f"{ticker}: falta columna "
+
+                    f"'{columna}'."
+
+                )
+
+
+
+                return pd.DataFrame()
+
+
+
+        # ====================================================
+
+        # LIMPIEZA
+
+        # ====================================================
+
+
+
+        for columna in columnas:
+
+
+
+            df[columna] = pd.to_numeric(
+
+                df[columna],
+
+                errors="coerce",
+
             )
 
-            try:
 
-                notificaciones.notificar(
-                    f"⚠️ Error en el loop "
-                    f"de acciones: {e}"
-                )
 
-            except Exception:
+        df = df.dropna(
 
-                pass
+            subset=columnas
 
-        time.sleep(
-            60
-            * config.CHECK_INTERVAL_MINUTES
         )
 
 
-# =========================================================
-# LOOP MONITOR DE EJECUCIONES
-# =========================================================
 
-def loop_ejecuciones():
+        df = df.sort_index()
 
-    log.info(
-        "[ejecuciones] Monitor de órdenes iniciado."
-    )
 
-    # Ignorar operaciones que ya existían
-    # antes de arrancar el bot.
-    broker.inicializar_monitor_ejecuciones()
 
-    while True:
+        df = df[
 
-        try:
+            ~df.index.duplicated(
 
-            mensajes = (
-                broker.detectar_ejecuciones()
+                keep="last"
+
             )
 
-            for mensaje in mensajes:
-
-                try:
-
-                    notificaciones.notificar(
-                        mensaje
-                    )
-
-                    log.info(
-                        "[ejecuciones] "
-                        "Notificación enviada."
-                    )
-
-                except Exception as e:
-
-                    log.error(
-                        f"[ejecuciones] "
-                        f"Error enviando "
-                        f"Telegram: {e}"
-                    )
-
-        except Exception as e:
-
-            log.error(
-                f"[ejecuciones] "
-                f"Error monitorizando "
-                f"órdenes: {e}"
-            )
-
-        # Revisar cada 30 segundos
-        time.sleep(30)
+        ]
 
 
-# =========================================================
-# LOOP CRIPTO
-# =========================================================
 
-def loop_cripto():
+        log.debug(
 
-    if not config.CRYPTO_TICKERS:
-        return
+            f"{ticker}: "
 
-    while True:
+            f"{len(df)} velas obtenidas."
 
-        try:
-
-            for ticker in config.CRYPTO_TICKERS:
-
-                try:
-
-                    revisar_ticker(
-                        ticker
-                    )
-
-                except Exception as e:
-
-                    log.error(
-                        f"[cripto] Error "
-                        f"procesando "
-                        f"{ticker}: {e}"
-                    )
-
-        except Exception as e:
-
-            log.error(
-                f"[cripto] Error en "
-                f"el loop de cripto: {e}"
-            )
-
-            try:
-
-                notificaciones.notificar(
-                    f"⚠️ Error en el loop "
-                    f"de cripto: {e}"
-                )
-
-            except Exception:
-
-                pass
-
-        time.sleep(
-            60
-            * config.CRYPTO_CHECK_INTERVAL_MINUTES
         )
 
 
-# =========================================================
-# MAIN
-# =========================================================
 
-def main():
+        return df
 
-    config.validar()
 
-    log.info(
-        f"Iniciando bot — modo "
-        f"{'PAPER (simulado)' if config.PAPER else 'REAL'}"
-    )
-
-    log.info(
-        f"Acciones: {config.TICKERS} "
-        f"(cada "
-        f"{config.CHECK_INTERVAL_MINUTES} min) | "
-        f"Cripto: {config.CRYPTO_TICKERS} "
-        f"(cada "
-        f"{config.CRYPTO_CHECK_INTERVAL_MINUTES} min)"
-    )
-
-    try:
-
-        notificaciones.notificar(
-            f"🤖 Bot iniciado "
-            f"({'paper' if config.PAPER else 'REAL'}) — "
-            f"acciones: "
-            f"{', '.join(config.TICKERS) or '(ninguna)'} "
-            f"— cripto: "
-            f"{', '.join(config.CRYPTO_TICKERS) or '(ninguna)'}"
-        )
 
     except Exception as e:
 
-        log.warning(
-            f"No se pudo enviar "
-            f"notificación de inicio: {e}"
-        )
 
-    # =====================================================
-    # HILOS
-    # =====================================================
-
-    hilos = []
-
-    # Monitor de ejecuciones
-    hilos.append(
-        threading.Thread(
-            target=loop_ejecuciones,
-            daemon=True,
-        )
-    )
-
-    # Acciones
-    if config.TICKERS:
-
-        hilos.append(
-            threading.Thread(
-                target=loop_acciones,
-                daemon=True,
-            )
-        )
-
-    # Cripto
-    if config.CRYPTO_TICKERS:
-
-        hilos.append(
-            threading.Thread(
-                target=loop_cripto,
-                daemon=True,
-            )
-        )
-
-    if not hilos:
 
         log.error(
-            "No hay TICKERS ni "
-            "CRYPTO_TICKERS configurados. "
-            "Nada que hacer."
+
+            f"{ticker}: error obteniendo datos: {e}"
+
         )
 
-        return
 
-    # =====================================================
-    # ARRANCAR HILOS
-    # =====================================================
 
-    for hilo in hilos:
+        return pd.DataFrame()
 
-        hilo.start()
 
-    log.info(
-        "Todos los procesos del bot "
-        "han sido iniciados correctamente."
+
+
+
+# ============================================================
+
+# POSICIONES
+
+# ============================================================
+
+
+
+def obtener_posicion(
+
+    ticker: str,
+
+):
+
+
+
+    try:
+
+
+
+        return cliente_trading.get_open_position(
+
+            ticker
+
+        )
+
+
+
+    except Exception:
+
+
+
+        return None
+
+
+
+
+
+def obtener_todas_las_posiciones():
+
+
+
+    try:
+
+
+
+        return cliente_trading.get_all_positions()
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[posiciones] Error obteniendo "
+
+            f"posiciones: {e}"
+
+        )
+
+
+
+        return []
+
+
+
+
+
+def tiene_posicion_abierta(
+
+    ticker: str,
+
+) -> bool:
+
+
+
+    return (
+
+        obtener_posicion(ticker)
+
+        is not None
+
     )
 
-    # Mantener vivo el proceso principal
-    while True:
-
-        time.sleep(60)
 
 
-# =========================================================
-# EJECUCIÓN
-# =========================================================
 
-if __name__ == "__main__":
-    main()
+
+def contar_posiciones_abiertas() -> int:
+
+
+
+    try:
+
+
+
+        posiciones = (
+
+            cliente_trading.get_all_positions()
+
+        )
+
+
+
+        return len(posiciones)
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[posiciones] Error contando "
+
+            f"posiciones: {e}"
+
+        )
+
+
+
+        return 0
+
+
+
+
+
+# ============================================================
+
+# ÓRDENES ABIERTAS
+
+# ============================================================
+
+
+
+def obtener_ordenes_abiertas():
+
+
+
+    try:
+
+
+
+        request = GetOrdersRequest(
+
+            status=QueryOrderStatus.OPEN
+
+        )
+
+
+
+        return cliente_trading.get_orders(
+
+            filter=request
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[ordenes] Error obteniendo "
+
+            f"órdenes abiertas: {e}"
+
+        )
+
+
+
+        return []
+
+
+
+
+
+def obtener_ordenes_ticker(
+
+    ticker: str,
+
+):
+
+
+
+    try:
+
+
+
+        ordenes = obtener_ordenes_abiertas()
+
+
+
+        return [
+
+            orden
+
+            for orden in ordenes
+
+            if getattr(
+
+                orden,
+
+                "symbol",
+
+                None,
+
+            ) == ticker
+
+        ]
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error obteniendo órdenes: {e}"
+
+        )
+
+
+
+        return []
+
+
+
+
+
+# ============================================================
+
+# ANALIZAR ORDEN DE PROTECCIÓN
+
+# ============================================================
+
+
+
+def _analizar_orden_proteccion(
+
+    orden,
+
+):
+
+
+
+    """
+
+    Devuelve:
+
+
+
+        (tiene_sl, tiene_tp)
+
+
+
+    Una OCO válida contiene SL + TP.
+
+    """
+
+
+
+    try:
+
+
+
+        side = str(
+
+            getattr(
+
+                orden,
+
+                "side",
+
+                "",
+
+            )
+
+        ).lower()
+
+
+
+        if "sell" not in side:
+
+
+
+            return False, False
+
+
+
+        tipo = str(
+
+            getattr(
+
+                orden,
+
+                "type",
+
+                "",
+
+            )
+
+        ).lower()
+
+
+
+        order_class = str(
+
+            getattr(
+
+                orden,
+
+                "order_class",
+
+                "",
+
+            )
+
+        ).lower()
+
+
+
+        # ====================================================
+
+        # OCO
+
+        # ====================================================
+
+
+
+        if "oco" in order_class:
+
+
+
+            return True, True
+
+
+
+        # ====================================================
+
+        # BRACKET
+
+        # ====================================================
+
+
+
+        if "bracket" in order_class:
+
+
+
+            return True, True
+
+
+
+        # ====================================================
+
+        # CAMPOS
+
+        # ====================================================
+
+
+
+        stop_price = getattr(
+
+            orden,
+
+            "stop_price",
+
+            None,
+
+        )
+
+
+
+        stop_loss = getattr(
+
+            orden,
+
+            "stop_loss",
+
+            None,
+
+        )
+
+
+
+        take_profit = getattr(
+
+            orden,
+
+            "take_profit",
+
+            None,
+
+        )
+
+
+
+        tiene_sl = (
+
+            stop_price is not None
+
+            or stop_loss is not None
+
+            or "stop" in tipo
+
+        )
+
+
+
+        tiene_tp = (
+
+            take_profit is not None
+
+        )
+
+
+
+        # ====================================================
+
+        # LEGS
+
+        # ====================================================
+
+
+
+        legs = getattr(
+
+            orden,
+
+            "legs",
+
+            None,
+
+        )
+
+
+
+        if legs:
+
+
+
+            for leg in legs:
+
+
+
+                leg_side = str(
+
+                    getattr(
+
+                        leg,
+
+                        "side",
+
+                        "",
+
+                    )
+
+                ).lower()
+
+
+
+                if "sell" not in leg_side:
+
+
+
+                    continue
+
+
+
+                leg_type = str(
+
+                    getattr(
+
+                        leg,
+
+                        "type",
+
+                        "",
+
+                    )
+
+                ).lower()
+
+
+
+                leg_stop_price = getattr(
+
+                    leg,
+
+                    "stop_price",
+
+                    None,
+
+                )
+
+
+
+                leg_limit_price = getattr(
+
+                    leg,
+
+                    "limit_price",
+
+                    None,
+
+                )
+
+
+
+                if (
+
+                    leg_stop_price is not None
+
+                    or "stop" in leg_type
+
+                ):
+
+
+
+                    tiene_sl = True
+
+
+
+                if (
+
+                    leg_limit_price is not None
+
+                    or "limit" in leg_type
+
+                ):
+
+
+
+                    tiene_tp = True
+
+
+
+        return tiene_sl, tiene_tp
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[protección] Error analizando orden: {e}"
+
+        )
+
+
+
+        return False, False
+
+
+
+
+
+# ============================================================
+
+# ANALIZAR PROTECCIÓN
+
+# ============================================================
+
+
+
+def analizar_proteccion(
+
+    ticker: str,
+
+) -> dict:
+
+
+
+    resultado = {
+
+        "tiene_sl": False,
+
+        "tiene_tp": False,
+
+        "tiene_proteccion": False,
+
+        "ordenes_proteccion": [],
+
+    }
+
+
+
+    try:
+
+
+
+        ordenes = obtener_ordenes_ticker(
+
+            ticker
+
+        )
+
+
+
+        for orden in ordenes:
+
+
+
+            tiene_sl, tiene_tp = (
+
+                _analizar_orden_proteccion(
+
+                    orden
+
+                )
+
+            )
+
+
+
+            if not (
+
+                tiene_sl
+
+                or tiene_tp
+
+            ):
+
+
+
+                continue
+
+
+
+            resultado[
+
+                "ordenes_proteccion"
+
+            ].append(
+
+                orden
+
+            )
+
+
+
+            if tiene_sl:
+
+
+
+                resultado[
+
+                    "tiene_sl"
+
+                ] = True
+
+
+
+            if tiene_tp:
+
+
+
+                resultado[
+
+                    "tiene_tp"
+
+                ] = True
+
+
+
+            log.debug(
+
+                f"{ticker}: "
+
+                f"orden={getattr(orden, 'id', '?')} "
+
+                f"type={getattr(orden, 'type', '?')} "
+
+                f"class={getattr(orden, 'order_class', '?')} "
+
+                f"SL={tiene_sl} "
+
+                f"TP={tiene_tp}"
+
+            )
+
+
+
+        resultado[
+
+            "tiene_proteccion"
+
+        ] = (
+
+            resultado["tiene_sl"]
+
+            and resultado["tiene_tp"]
+
+        )
+
+
+
+        log.info(
+
+            f"{ticker}: análisis protección → "
+
+            f"SL="
+
+            f"{'✅' if resultado['tiene_sl'] else '❌'} "
+
+            f"TP="
+
+            f"{'✅' if resultado['tiene_tp'] else '❌'} "
+
+            f"COMPLETA="
+
+            f"{'✅' if resultado['tiene_proteccion'] else '❌'}"
+
+        )
+
+
+
+        return resultado
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error analizando protección: {e}"
+
+        )
+
+
+
+        return resultado
+
+
+
+
+
+def tiene_proteccion(
+
+    ticker: str,
+
+) -> bool:
+
+
+
+    resultado = analizar_proteccion(
+
+        ticker
+
+    )
+
+
+
+    return bool(
+
+        resultado[
+
+            "tiene_proteccion"
+
+        ]
+
+    )
+
+
+
+
+
+# ============================================================
+
+# CANCELAR PROTECCIONES
+
+# ============================================================
+
+
+
+def cancelar_protecciones(
+
+    ticker: str,
+
+) -> bool:
+
+
+
+    try:
+
+
+
+        ordenes = obtener_ordenes_ticker(
+
+            ticker
+
+        )
+
+
+
+        protecciones = []
+
+
+
+        for orden in ordenes:
+
+
+
+            tiene_sl, tiene_tp = (
+
+                _analizar_orden_proteccion(
+
+                    orden
+
+                )
+
+            )
+
+
+
+            if tiene_sl or tiene_tp:
+
+
+
+                protecciones.append(
+
+                    orden
+
+                )
+
+
+
+        if not protecciones:
+
+
+
+            return True
+
+
+
+        for orden in protecciones:
+
+
+
+            try:
+
+
+
+                cliente_trading.cancel_order_by_id(
+
+                    orden.id
+
+                )
+
+
+
+                log.info(
+
+                    f"{ticker}: protección "
+
+                    f"{orden.id} cancelada."
+
+                )
+
+
+
+            except Exception as e:
+
+
+
+                error = str(e).lower()
+
+
+
+                if (
+
+                    "not found" in error
+
+                    or "already canceled" in error
+
+                    or "already cancelled" in error
+
+                    or "cancelled" in error
+
+                    or "canceled" in error
+
+                ):
+
+
+
+                    continue
+
+
+
+                log.warning(
+
+                    f"{ticker}: no se pudo "
+
+                    f"cancelar protección "
+
+                    f"{orden.id}: {e}"
+
+                )
+
+
+
+                return False
+
+
+
+        return True
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error cancelando "
+
+            f"protecciones: {e}"
+
+        )
+
+
+
+        return False
+
+
+
+
+
+# ============================================================
+
+# PROTEGER POSICIÓN
+
+# ============================================================
+
+
+
+def proteger_posicion(
+
+    ticker: str,
+
+    atr_actual: float,
+
+):
+
+
+
+    try:
+
+
+
+        # Las criptos utilizan protección manual.
+
+        if es_cripto(ticker):
+
+
+
+            return None
+
+
+
+        posicion = obtener_posicion(
+
+            ticker
+
+        )
+
+
+
+        if posicion is None:
+
+
+
+            log.info(
+
+                f"{ticker}: posición todavía "
+
+                f"no disponible."
+
+            )
+
+
+
+            return None
+
+
+
+        if (
+
+            atr_actual is None
+
+            or atr_actual <= 0
+
+        ):
+
+
+
+            log.warning(
+
+                f"{ticker}: ATR inválido."
+
+            )
+
+
+
+            return None
+
+
+
+        # ====================================================
+
+        # COMPROBAR PROTECCIÓN
+
+        # ====================================================
+
+
+
+        analisis = analizar_proteccion(
+
+            ticker
+
+        )
+
+
+
+        if analisis[
+
+            "tiene_proteccion"
+
+        ]:
+
+
+
+            log.info(
+
+                f"{ticker}: protección completa "
+
+                f"ya existente."
+
+            )
+
+
+
+            return None
+
+
+
+        # ====================================================
+
+        # SI ESTÁ INCOMPLETA, RECONSTRUIR
+
+        # ====================================================
+
+
+
+        if (
+
+            analisis["tiene_sl"]
+
+            or analisis["tiene_tp"]
+
+        ):
+
+
+
+            log.warning(
+
+                f"{ticker}: protección incompleta. "
+
+                f"Reconstruyendo."
+
+            )
+
+
+
+            if not cancelar_protecciones(
+
+                ticker
+
+            ):
+
+
+
+                log.error(
+
+                    f"{ticker}: no se pudieron "
+
+                    f"cancelar las protecciones."
+
+                )
+
+
+
+                return None
+
+
+
+        # ====================================================
+
+        # POSICIÓN
+
+        # ====================================================
+
+
+
+        cantidad = float(
+
+            posicion.qty
+
+        )
+
+
+
+        precio_entrada = float(
+
+            posicion.avg_entry_price
+
+        )
+
+
+
+        if (
+
+            cantidad <= 0
+
+            or precio_entrada <= 0
+
+        ):
+
+
+
+            log.warning(
+
+                f"{ticker}: posición inválida."
+
+            )
+
+
+
+            return None
+
+
+
+        # ====================================================
+
+        # STOP LOSS
+
+        # ====================================================
+
+
+
+        distancia_stop = max(
+
+            atr_actual
+
+            * config.ATR_STOP_MULTIPLICADOR,
+
+
+
+            precio_entrada
+
+            * config.STOP_LOSS_PCT,
+
+        )
+
+
+
+        stop_price = (
+
+            precio_entrada
+
+            - distancia_stop
+
+        )
+
+
+
+        # ====================================================
+
+        # TAKE PROFIT
+
+        # ====================================================
+
+
+
+        distancia_take = max(
+
+            atr_actual
+
+            * config.ATR_TAKE_PROFIT_MULTIPLICADOR,
+
+
+
+            precio_entrada
+
+            * config.TAKE_PROFIT_PCT,
+
+        )
+
+
+
+        take_price = (
+
+            precio_entrada
+
+            + distancia_take
+
+        )
+
+
+
+        if stop_price <= 0:
+
+
+
+            log.warning(
+
+                f"{ticker}: stop inválido."
+
+            )
+
+
+
+            return None
+
+
+
+        if take_price <= precio_entrada:
+
+
+
+            log.warning(
+
+                f"{ticker}: take profit inválido."
+
+            )
+
+
+
+            return None
+
+
+
+        # ====================================================
+
+        # OCO
+
+        # ====================================================
+
+
+
+        orden = LimitOrderRequest(
+
+            symbol=ticker,
+
+            qty=cantidad,
+
+            side=OrderSide.SELL,
+
+            time_in_force=TimeInForce.GTC,
+
+            order_class=OrderClass.OCO,
+
+
+
+            stop_loss=StopLossRequest(
+
+                stop_price=round(
+
+                    stop_price,
+
+                    2,
+
+                )
+
+            ),
+
+
+
+            take_profit=TakeProfitRequest(
+
+                limit_price=round(
+
+                    take_price,
+
+                    2,
+
+                )
+
+            ),
+
+        )
+
+
+
+        resultado = (
+
+            cliente_trading.submit_order(
+
+                order_data=orden
+
+            )
+
+        )
+
+
+
+        log.info(
+
+            f"{ticker}: OCO creada. "
+
+            f"Orden={resultado.id} | "
+
+            f"SL=${stop_price:.2f} | "
+
+            f"TP=${take_price:.2f}"
+
+        )
+
+
+
+        return (
+
+            f"🛡️ PROTECCIÓN ACTIVADA\n"
+
+            f"📈 {ticker} | 15M\n"
+
+            f"SL: ${stop_price:.2f}\n"
+
+            f"TP: ${take_price:.2f}\n"
+
+            f"Entrada: ${precio_entrada:.2f}"
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error colocando "
+
+            f"protección: {e}"
+
+        )
+
+
+
+        return None
+
+
+
+
+
+# ============================================================
+
+# TAMAÑO DE POSICIÓN
+
+# ============================================================
+
+
+
+def calcular_tamano_posicion(
+
+    ticker: str,
+
+    precio: float,
+
+    atr: float,
+
+):
+
+
+
+    try:
+
+
+
+        if (
+
+            precio <= 0
+
+            or atr is None
+
+            or atr <= 0
+
+        ):
+
+
+
+            return 0
+
+
+
+        cuenta = (
+
+            cliente_trading
+
+            .get_account()
+
+        )
+
+
+
+        equity = float(
+
+            cuenta.equity
+
+        )
+
+
+
+        buying_power = float(
+
+            cuenta.buying_power
+
+        )
+
+
+
+        # Riesgo = 2% por operación
+
+        riesgo_dolares = (
+
+            equity
+
+            * config.RISK_PER_TRADE_PCT
+
+        )
+
+
+
+        distancia_stop = max(
+
+            atr
+
+            * config.ATR_STOP_MULTIPLICADOR,
+
+
+
+            precio
+
+            * config.STOP_LOSS_PCT,
+
+        )
+
+
+
+        if distancia_stop <= 0:
+
+
+
+            return 0
+
+
+
+        cantidad = (
+
+            riesgo_dolares
+
+            / distancia_stop
+
+        )
+
+
+
+        # ====================================================
+
+        # CRIPTO
+
+        # ====================================================
+
+
+
+        if es_cripto(ticker):
+
+
+
+            max_notional = min(
+
+                equity * 0.20,
+
+                200000,
+
+                buying_power * 0.90,
+
+            )
+
+
+
+            cantidad_maxima = (
+
+                max_notional
+
+                / precio
+
+            )
+
+
+
+            cantidad = min(
+
+                cantidad,
+
+                cantidad_maxima,
+
+            )
+
+
+
+            return round(
+
+                cantidad,
+
+                6,
+
+            )
+
+
+
+        # ====================================================
+
+        # ACCIONES
+
+        # ====================================================
+
+
+
+        max_notional = (
+
+            buying_power * 0.90
+
+        )
+
+
+
+        cantidad_maxima = (
+
+            max_notional
+
+            / precio
+
+        )
+
+
+
+        cantidad = min(
+
+            cantidad,
+
+            cantidad_maxima,
+
+        )
+
+
+
+        return int(
+
+            cantidad
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error calculando "
+
+            f"tamaño: {e}"
+
+        )
+
+
+
+        return 0
+
+
+
+
+
+# ============================================================
+
+# COMPRAR
+
+# ============================================================
+
+
+
+def comprar(
+
+    ticker: str,
+
+    precio: float,
+
+    atr: float,
+
+):
+
+
+
+    try:
+
+
+
+        cantidad = (
+
+            calcular_tamano_posicion(
+
+                ticker,
+
+                precio,
+
+                atr,
+
+            )
+
+        )
+
+
+
+        if cantidad <= 0:
+
+
+
+            log.warning(
+
+                f"{ticker}: tamaño de "
+
+                f"posición inválido."
+
+            )
+
+
+
+            return None
+
+
+
+        tif = (
+
+            TimeInForce.GTC
+
+            if es_cripto(ticker)
+
+            else TimeInForce.DAY
+
+        )
+
+
+
+        orden = MarketOrderRequest(
+
+            symbol=ticker,
+
+            qty=cantidad,
+
+            side=OrderSide.BUY,
+
+            time_in_force=tif,
+
+        )
+
+
+
+        resultado = (
+
+            cliente_trading.submit_order(
+
+                order_data=orden
+
+            )
+
+        )
+
+
+
+        mensaje = (
+
+            f"🟡 ORDEN ENVIADA\n"
+
+            f"{'₿' if es_cripto(ticker) else '📈'} "
+
+            f"{ticker} | "
+
+            f"{'5M' if es_cripto(ticker) else '15M'}\n"
+
+            f"Cantidad: {cantidad}\n"
+
+            f"Precio estimado: ${precio:.2f}"
+
+        )
+
+
+
+        log.info(
+
+            f"{ticker}: orden enviada "
+
+            f"{resultado.id}"
+
+        )
+
+
+
+        return mensaje
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error comprando: {e}"
+
+        )
+
+
+
+        return None
+
+
+
+
+
+# ============================================================
+
+# VENDER
+
+# ============================================================
+
+
+
+def vender(
+
+    ticker: str,
+
+):
+
+
+
+    try:
+
+
+
+        posicion = obtener_posicion(
+
+            ticker
+
+        )
+
+
+
+        if posicion is None:
+
+
+
+            return None
+
+
+
+        cantidad = float(
+
+            posicion.qty
+
+        )
+
+
+
+        # Antes de vender una acción,
+
+        # cancelar sus protecciones.
+
+        if not es_cripto(ticker):
+
+
+
+            if not cancelar_protecciones(
+
+                ticker
+
+            ):
+
+
+
+                log.warning(
+
+                    f"{ticker}: no se pudieron "
+
+                    f"cancelar todas las protecciones."
+
+                )
+
+
+
+                return None
+
+
+
+        tif = (
+
+            TimeInForce.GTC
+
+            if es_cripto(ticker)
+
+            else TimeInForce.DAY
+
+        )
+
+
+
+        orden = MarketOrderRequest(
+
+            symbol=ticker,
+
+            qty=cantidad,
+
+            side=OrderSide.SELL,
+
+            time_in_force=tif,
+
+        )
+
+
+
+        resultado = (
+
+            cliente_trading.submit_order(
+
+                order_data=orden
+
+            )
+
+        )
+
+
+
+        mensaje = (
+
+            f"🟡 ORDEN DE VENTA ENVIADA\n"
+
+            f"{'₿' if es_cripto(ticker) else '📈'} "
+
+            f"{ticker} | "
+
+            f"{'5M' if es_cripto(ticker) else '15M'}\n"
+
+            f"Cantidad: {cantidad}"
+
+        )
+
+
+
+        log.info(
+
+            f"{ticker}: venta enviada "
+
+            f"{resultado.id}"
+
+        )
+
+
+
+        return mensaje
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error vendiendo: {e}"
+
+        )
+
+
+
+        return None
+
+
+
+
+
+# ============================================================
+
+# PÉRDIDA NO REALIZADA
+
+# ============================================================
+
+
+
+def perdida_pct_no_realizada(
+
+    ticker: str,
+
+) -> float:
+
+
+
+    try:
+
+
+
+        posicion = obtener_posicion(
+
+            ticker
+
+        )
+
+
+
+        if posicion is None:
+
+
+
+            return 0.0
+
+
+
+        precio_entrada = float(
+
+            posicion.avg_entry_price
+
+        )
+
+
+
+        precio_actual = float(
+
+            posicion.current_price
+
+        )
+
+
+
+        if precio_entrada <= 0:
+
+
+
+            return 0.0
+
+
+
+        return (
+
+            (
+
+                precio_actual
+
+                - precio_entrada
+
+            )
+
+            / precio_entrada
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error calculando "
+
+            f"pérdida: {e}"
+
+        )
+
+
+
+        return 0.0
+
+
+
+
+
+# ============================================================
+
+# PRECIO ACTUAL
+
+# ============================================================
+
+
+
+def precio_actual_posicion(
+
+    ticker: str,
+
+):
+
+
+
+    try:
+
+
+
+        posicion = obtener_posicion(
+
+            ticker
+
+        )
+
+
+
+        if posicion is None:
+
+
+
+            return None
+
+
+
+        precio_entrada = float(
+
+            posicion.avg_entry_price
+
+        )
+
+
+
+        precio_actual = float(
+
+            posicion.current_price
+
+        )
+
+
+
+        return (
+
+            precio_entrada,
+
+            precio_actual,
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"{ticker}: error obteniendo "
+
+            f"precio: {e}"
+
+        )
+
+
+
+        return None
+
+
+
+
+
+# ============================================================
+
+# MONITOR DE EJECUCIONES
+
+# ============================================================
+
+
+
+_ordenes_notificadas = set()
+
+
+
+
+
+def obtener_ordenes_ejecutadas():
+
+
+
+    try:
+
+
+
+        request = GetOrdersRequest(
+
+            status=QueryOrderStatus.CLOSED
+
+        )
+
+
+
+        return cliente_trading.get_orders(
+
+            filter=request
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[ejecuciones] Error obteniendo "
+
+            f"órdenes: {e}"
+
+        )
+
+
+
+        return []
+
+
+
+
+
+def inicializar_monitor_ejecuciones():
+
+
+
+    global _ordenes_notificadas
+
+
+
+    try:
+
+
+
+        ordenes = (
+
+            obtener_ordenes_ejecutadas()
+
+        )
+
+
+
+        for orden in ordenes:
+
+
+
+            status = str(
+
+                getattr(
+
+                    orden,
+
+                    "status",
+
+                    "",
+
+                )
+
+            ).lower()
+
+
+
+            if "filled" in status:
+
+
+
+                _ordenes_notificadas.add(
+
+                    str(
+
+                        orden.id
+
+                    )
+
+                )
+
+
+
+        log.info(
+
+            f"[ejecuciones] "
+
+            f"Monitor inicializado. "
+
+            f"{len(_ordenes_notificadas)} "
+
+            f"órdenes antiguas ignoradas."
+
+        )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[ejecuciones] "
+
+            f"Error inicializando monitor: {e}"
+
+        )
+
+
+
+
+
+def detectar_ejecuciones():
+
+
+
+    global _ordenes_notificadas
+
+
+
+    nuevas = []
+
+
+
+    try:
+
+
+
+        ordenes = (
+
+            obtener_ordenes_ejecutadas()
+
+        )
+
+
+
+        for orden in ordenes:
+
+
+
+            order_id = str(
+
+                orden.id
+
+            )
+
+
+
+            if (
+
+                order_id
+
+                in _ordenes_notificadas
+
+            ):
+
+
+
+                continue
+
+
+
+            status = str(
+
+                getattr(
+
+                    orden,
+
+                    "status",
+
+                    "",
+
+                )
+
+            ).lower()
+
+
+
+            if "filled" not in status:
+
+
+
+                continue
+
+
+
+            _ordenes_notificadas.add(
+
+                order_id
+
+            )
+
+
+
+            ticker = getattr(
+
+                orden,
+
+                "symbol",
+
+                "?"
+
+            )
+
+
+
+            side = str(
+
+                getattr(
+
+                    orden,
+
+                    "side",
+
+                    ""
+
+                )
+
+            ).lower()
+
+
+
+            qty = getattr(
+
+                orden,
+
+                "filled_qty",
+
+                getattr(
+
+                    orden,
+
+                    "qty",
+
+                    "?"
+
+                )
+
+            )
+
+
+
+            precio = getattr(
+
+                orden,
+
+                "filled_avg_price",
+
+                None
+
+            )
+
+
+
+            es_compra = (
+
+                "buy" in side
+
+            )
+
+
+
+            es_accion = (
+
+                not es_cripto(
+
+                    ticker
+
+                )
+
+            )
+
+
+
+            if es_compra:
+
+
+
+                emoji = "🟢"
+
+                accion = "COMPRA"
+
+
+
+            else:
+
+
+
+                emoji = "🔴"
+
+                accion = "VENTA"
+
+
+
+            tipo = (
+
+                "₿ CRIPTO | 5M"
+
+                if es_cripto(ticker)
+
+                else "📈 ACCIÓN | 15M"
+
+            )
+
+
+
+            if precio is not None:
+
+
+
+                mensaje = (
+
+                    f"{emoji} {accion} EJECUTADA\n"
+
+                    f"{tipo}\n"
+
+                    f"{ticker}\n"
+
+                    f"Cantidad: {qty}\n"
+
+                    f"Precio: "
+
+                    f"${float(precio):.2f}"
+
+                )
+
+
+
+            else:
+
+
+
+                mensaje = (
+
+                    f"{emoji} {accion} EJECUTADA\n"
+
+                    f"{tipo}\n"
+
+                    f"{ticker}\n"
+
+                    f"Cantidad: {qty}"
+
+                )
+
+
+
+            nuevas.append(
+
+                {
+
+                    "mensaje": mensaje,
+
+                    "ticker": ticker,
+
+                    "compra_accion": (
+
+                        es_compra
+
+                        and es_accion
+
+                    ),
+
+                }
+
+            )
+
+
+
+    except Exception as e:
+
+
+
+        log.error(
+
+            f"[ejecuciones] "
+
+            f"Error detectando ejecuciones: {e}"
+
+        )
+
+
+
+    return nuevas
