@@ -51,7 +51,6 @@ TICKERS = [
     if t.strip()
 ]
 
-
 CRYPTO_TICKERS = [
     t.strip().upper()
     for t in os.environ.get(
@@ -196,10 +195,9 @@ TELEGRAM_CHAT_ID = os.environ.get(
     ""
 )
 
-# Nombre que aparecerá para diferenciar cada cuenta/bot
 BOT_NOMBRE = os.environ.get(
     "BOT_NOMBRE",
-    "CUENTA PRINCIPAL"
+    "CUENTA PRINCIPAL - TRANQUILO"
 )
 
 
@@ -220,5 +218,4 @@ def validar():
         raise RuntimeError(
             f"Faltan variables de entorno: {', '.join(faltantes)}. "
             f"Configuralas en Railway (Settings -> Variables)."
-        )
         )
