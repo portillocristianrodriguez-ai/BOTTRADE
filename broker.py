@@ -1,6 +1,10 @@
 """
 Todo lo que toca la API de Alpaca:
-datos, posiciones y ordenes.
+- traer datos
+- consultar posiciones
+- ejecutar órdenes
+- proteger posiciones
+- detectar ejecuciones
 """
 
 import logging
@@ -11,22 +15,29 @@ import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
-    LimitOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
-    GetOrdersRequest,
 )
 from alpaca.trading.enums import (
     OrderSide,
     TimeInForce,
     OrderClass,
-    QueryOrderStatus,
 )
 
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.historical import (
+    StockHistoricalDataClient,
+    CryptoHistoricalDataClient,
+)
+
+from alpaca.data.requests import (
+    StockBarsRequest,
+    CryptoBarsRequest,
+)
+
+from alpaca.data.timeframe import (
+    TimeFrame,
+    TimeFrameUnit,
+)
 
 import config
 
@@ -34,243 +45,185 @@ import config
 log = logging.getLogger(__name__)
 
 
-# =========================================================
+# ============================================================
 # CLIENTES ALPACA
-# =========================================================
+# ============================================================
 
-trading_client = TradingClient(
-    config.API_KEY,
-    config.API_SECRET,
-    paper=config.PAPER,
+cliente_trading = TradingClient(
+    config.ALPACA_API_KEY,
+    config.ALPACA_API_SECRET,
+    paper=config.ALPACA_PAPER,
 )
 
-data_client = StockHistoricalDataClient(
-    config.API_KEY,
-    config.API_SECRET,
+cliente_datos_acciones = StockHistoricalDataClient(
+    config.ALPACA_API_KEY,
+    config.ALPACA_API_SECRET,
 )
 
-crypto_data_client = CryptoHistoricalDataClient()
+cliente_datos_crypto = CryptoHistoricalDataClient(
+    config.ALPACA_API_KEY,
+    config.ALPACA_API_SECRET,
+)
 
 
-# =========================================================
-# TIMEFRAMES
-# =========================================================
-
-TIMEFRAME_ACCIONES = TimeFrame.Day
-TIMEFRAME_CRIPTO = TimeFrame.Minute
-
-
-# =========================================================
+# ============================================================
 # UTILIDADES
-# =========================================================
+# ============================================================
 
-def es_cripto(ticker: str) -> bool:
+def es_cripto(ticker):
+    """Determina si el símbolo corresponde a una criptomoneda."""
     return "/" in ticker
 
 
-def mercado_abierto() -> bool:
-    return trading_client.get_clock().is_open
-
-
-# =========================================================
-# DATOS DE MERCADO
-# =========================================================
-
-def obtener_datos(ticker: str) -> pd.DataFrame:
+def obtener_datos(ticker, limit=200):
+    """
+    Obtiene datos históricos:
+    - Acciones: velas diarias
+    - Cripto: velas de 1 minuto
+    """
 
     if es_cripto(ticker):
 
         request = CryptoBarsRequest(
             symbol_or_symbols=ticker,
-            timeframe=TIMEFRAME_CRIPTO,
-            start=datetime.utcnow() - timedelta(minutes=500),
+            timeframe=TimeFrame(1, TimeFrameUnit.Minute),
+            limit=limit,
         )
 
-        bars = crypto_data_client.get_crypto_bars(
-            request
-        ).df
+        bars = cliente_datos_crypto.get_crypto_bars(request)
 
     else:
 
         request = StockBarsRequest(
             symbol_or_symbols=ticker,
-            timeframe=TIMEFRAME_ACCIONES,
-            start=datetime.utcnow() - timedelta(days=500),
+            timeframe=TimeFrame.Day,
+            limit=limit,
         )
 
-        bars = data_client.get_stock_bars(
-            request
-        ).df
-
-    if bars.empty:
-        return pd.DataFrame()
-
-    return (
-        bars.xs(ticker, level=0)
-        if isinstance(bars.index, pd.MultiIndex)
-        else bars
-    )
-
-
-# =========================================================
-# POSICIONES
-# =========================================================
-
-def tiene_posicion_abierta(ticker: str) -> bool:
+        bars = cliente_datos_acciones.get_stock_bars(request)
 
     try:
+        df = bars.df.copy()
 
-        trading_client.get_open_position(
-            ticker.replace("/", "")
-        )
+        if df.empty:
+            return df
 
+        # Si Alpaca devuelve MultiIndex, dejamos solamente
+        # el índice temporal para facilitar el procesamiento.
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.reset_index()
+
+            if "symbol" in df.columns:
+                df = df[df["symbol"] == ticker]
+
+            if "timestamp" in df.columns:
+                df = df.set_index("timestamp")
+
+        return df
+
+    except Exception as e:
+        log.error(f"{ticker}: error procesando datos: {e}")
+        return pd.DataFrame()
+
+
+# ============================================================
+# POSICIONES
+# ============================================================
+
+def obtener_posicion(ticker):
+    """Obtiene la posición abierta de un símbolo."""
+
+    try:
+        simbolo = ticker.replace("/", "")
+        return cliente_trading.get_open_position(simbolo)
+
+    except Exception:
+        return None
+
+
+def tiene_posicion_abierta(ticker):
+    """Devuelve True si existe una posición abierta."""
+
+    try:
+        simbolo = ticker.replace("/", "")
+        cliente_trading.get_open_position(simbolo)
         return True
 
     except Exception:
-
         return False
 
 
-def contar_posiciones_abiertas() -> int:
+# ============================================================
+# ÓRDENES ABIERTAS
+# ============================================================
 
-    return len(
-        trading_client.get_all_positions()
-    )
-
-
-def obtener_posicion(ticker: str):
+def obtener_ordenes_abiertas(ticker):
+    """Obtiene las órdenes abiertas de un ticker."""
 
     try:
-
-        return trading_client.get_open_position(
-            ticker.replace("/", "")
+        ordenes = cliente_trading.get_orders(
+            filter="open"
         )
 
-    except Exception:
+        simbolo = ticker.replace("/", "")
 
-        return None
-
-
-def perdida_pct_no_realizada(
-    ticker: str,
-) -> float | None:
-
-    try:
-
-        posicion = obtener_posicion(ticker)
-
-        if posicion is None:
-            return None
-
-        return float(
-            posicion.unrealized_plpc
-        )
-
-    except Exception:
-
-        return None
-
-
-def precio_actual_posicion(ticker: str):
-
-    try:
-
-        posicion = obtener_posicion(ticker)
-
-        if posicion is None:
-            return None
-
-        return (
-            float(posicion.avg_entry_price),
-            float(posicion.current_price),
-        )
-
-    except Exception:
-
-        return None
-
-
-# =========================================================
-# ORDENES ABIERTAS
-# =========================================================
-
-def obtener_ordenes_abiertas(ticker: str):
-
-    try:
-
-        filtro = GetOrdersRequest(
-            status=QueryOrderStatus.OPEN,
-            symbols=[
-                ticker.replace("/", "")
-            ],
-        )
-
-        return trading_client.get_orders(
-            filter=filtro
-        )
+        return [
+            orden
+            for orden in ordenes
+            if str(orden.symbol).replace("/", "") == simbolo
+        ]
 
     except Exception as e:
-
         log.error(
-            f"{ticker}: error consultando "
-            f"ordenes abiertas: {e}"
+            f"{ticker}: error obteniendo órdenes abiertas: {e}"
         )
-
         return []
 
 
-# =========================================================
-# COMPROBAR PROTECCION
-# =========================================================
+# ============================================================
+# PROTECCIÓN SL / TP
+# ============================================================
 
-def tiene_proteccion(
-    ticker: str,
-) -> tuple[bool, bool]:
+def tiene_proteccion(ticker):
+    """
+    Comprueba si una posición tiene Stop Loss y Take Profit.
 
-    tiene_sl = False
-    tiene_tp = False
+    Detecta:
+    - órdenes OCO
+    - stop
+    - limit
+    """
 
-    ordenes = obtener_ordenes_abiertas(
-        ticker
-    )
+    try:
 
-    for orden in ordenes:
+        ordenes = obtener_ordenes_abiertas(ticker)
 
-        try:
+        tiene_sl = False
+        tiene_tp = False
 
-            order_type = str(
-                getattr(
-                    orden,
-                    "type",
-                    "",
-                )
-            ).lower()
+        for orden in ordenes:
 
             order_class = str(
-                getattr(
-                    orden,
-                    "order_class",
-                    "",
-                )
+                getattr(orden, "order_class", "")
             ).lower()
 
-            stop_loss = getattr(
-                orden,
-                "stop_loss",
-                None,
-            )
-
-            take_profit = getattr(
-                orden,
-                "take_profit",
-                None,
-            )
-
-            # -------------------------------------------------
+            # ------------------------------------------------
             # OCO
-            # -------------------------------------------------
+            # ------------------------------------------------
 
             if "oco" in order_class:
+
+                stop_loss = getattr(
+                    orden,
+                    "stop_loss",
+                    None,
+                )
+
+                take_profit = getattr(
+                    orden,
+                    "take_profit",
+                    None,
+                )
 
                 if stop_loss is not None:
                     tiene_sl = True
@@ -278,646 +231,654 @@ def tiene_proteccion(
                 if take_profit is not None:
                     tiene_tp = True
 
-            # -------------------------------------------------
-            # STOP
-            # -------------------------------------------------
+            # ------------------------------------------------
+            # Órdenes individuales
+            # ------------------------------------------------
+
+            order_type = str(
+                getattr(orden, "type", "")
+            ).lower()
 
             if "stop" in order_type:
                 tiene_sl = True
 
-            # -------------------------------------------------
-            # LIMIT
-            # -------------------------------------------------
-
             if "limit" in order_type:
                 tiene_tp = True
 
-        except Exception:
+        return tiene_sl, tiene_tp
 
-            continue
+    except Exception as e:
 
-    return tiene_sl, tiene_tp
+        log.error(
+            f"{ticker}: error comprobando protección: {e}"
+        )
+
+        return False, False
 
 
-# =========================================================
-# TAMAÑO DE POSICION
-# =========================================================
+# ============================================================
+# PROTEGER POSICIÓN
+# ============================================================
 
-def calcular_tamano_posicion(
-    ticker: str,
-    precio: float,
-    atr: float,
-):
+def proteger_posicion(ticker):
+    """
+    Crea protección OCO para acciones.
 
-    cuenta = trading_client.get_account()
+    Las criptomonedas utilizan gestión manual
+    desde main.py.
+    """
 
-    capital = float(
-        cuenta.equity
-    )
+    if es_cripto(ticker):
+        return
 
-    riesgo_dolares = (
-        capital
-        * config.RISK_PER_TRADE_PCT
-    )
+    try:
 
-    riesgo_por_unidad = (
-        atr
-        * config.ATR_STOP_MULTIPLICADOR
-    )
+        posicion = obtener_posicion(ticker)
 
-    if (
-        riesgo_por_unidad <= 0
-        or pd.isna(riesgo_por_unidad)
-    ):
+        if posicion is None:
+            return
+
+        qty = float(posicion.qty)
+        precio_entrada = float(
+            posicion.avg_entry_price
+        )
+
+        # ----------------------------------------------------
+        # COMPROBAR SI YA ESTÁ PROTEGIDA
+        # ----------------------------------------------------
+
+        tiene_sl, tiene_tp = tiene_proteccion(ticker)
+
+        if tiene_sl and tiene_tp:
+
+            log.info(
+                f"{ticker}: posición ya protegida"
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # PRECIOS DE PROTECCIÓN
+        # ----------------------------------------------------
+
+        stop_loss_pct = float(
+            config.STOP_LOSS_PCT
+        )
+
+        take_profit_pct = float(
+            config.TAKE_PROFIT_PCT
+        )
+
+        precio_sl = precio_entrada * (
+            1 - stop_loss_pct
+        )
+
+        precio_tp = precio_entrada * (
+            1 + take_profit_pct
+        )
+
+        # ----------------------------------------------------
+        # CANCELAR PROTECCIONES ANTIGUAS
+        # ----------------------------------------------------
+
+        ordenes = obtener_ordenes_abiertas(ticker)
+
+        for orden in ordenes:
+
+            if str(orden.side).lower() == "sell":
+
+                try:
+
+                    cliente_trading.cancel_order_by_id(
+                        orden.id
+                    )
+
+                    log.info(
+                        f"{ticker}: orden SELL antigua cancelada"
+                    )
+
+                except Exception as e:
+
+                    log.warning(
+                        f"{ticker}: no se pudo cancelar "
+                        f"orden antigua: {e}"
+                    )
+
+        # ----------------------------------------------------
+        # CREAR OCO
+        # ----------------------------------------------------
+
+        orden_proteccion = MarketOrderRequest(
+            symbol=ticker,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC,
+            order_class=OrderClass.OCO,
+            stop_loss=StopLossRequest(
+                stop_price=round(precio_sl, 2)
+            ),
+            take_profit=TakeProfitRequest(
+                limit_price=round(precio_tp, 2)
+            ),
+        )
+
+        cliente_trading.submit_order(
+            order_data=orden_proteccion
+        )
+
+        log.info(
+            f"PROTECCION {ticker}: "
+            f"SL ${precio_sl:.2f} | "
+            f"TP ${precio_tp:.2f} "
+            f"(entrada ${precio_entrada:.2f})"
+        )
+
+    except Exception as e:
+
+        log.error(
+            f"{ticker}: error protegiendo posición: {e}"
+        )
+
+
+# ============================================================
+# TAMAÑO DE POSICIÓN
+# ============================================================
+
+def calcular_tamano_posicion(ticker, precio, atr):
+    """
+    Calcula el tamaño de posición según riesgo.
+
+    ACCIONES:
+        Mantiene el cálculo basado en riesgo.
+
+    CRIPTO:
+        Mantiene el cálculo basado en riesgo pero aplica
+        límites para evitar órdenes gigantescas.
+    """
+
+    try:
+
+        cuenta = cliente_trading.get_account()
+
+        capital = float(cuenta.equity)
+
+        riesgo_dolares = (
+            capital * config.RISK_PER_TRADE_PCT
+        )
+
+        if precio <= 0 or atr <= 0:
+            return 0
+
+        riesgo_por_unidad = (
+            atr * config.ATR_STOP_MULTIPLICADOR
+        )
+
+        if riesgo_por_unidad <= 0:
+            return 0
+
+        # ====================================================
+        # CÁLCULO ORIGINAL
+        # ====================================================
+
+        cantidad_riesgo = (
+            riesgo_dolares / riesgo_por_unidad
+        )
+
+        # ====================================================
+        # CRIPTO
+        # ====================================================
+
+        if es_cripto(ticker):
+
+            # Máximo 20% del capital en una sola
+            # operación de criptomonedas.
+            max_notional_capital = (
+                capital * 0.20
+            )
+
+            # Límite máximo de Alpaca.
+            max_notional_alpaca = 200000.0
+
+            # Intentar respetar buying power.
+            try:
+
+                buying_power = float(
+                    cuenta.buying_power
+                )
+
+                max_notional_buying_power = (
+                    buying_power * 0.90
+                )
+
+            except (TypeError, ValueError):
+
+                max_notional_buying_power = (
+                    max_notional_capital
+                )
+
+            # El límite final es el menor de los tres.
+            max_notional = min(
+                max_notional_capital,
+                max_notional_alpaca,
+                max_notional_buying_power,
+            )
+
+            cantidad_maxima = (
+                max_notional / precio
+            )
+
+            cantidad = min(
+                cantidad_riesgo,
+                cantidad_maxima,
+            )
+
+            cantidad = round(
+                max(cantidad, 0),
+                6,
+            )
+
+            log.info(
+                f"{ticker}: "
+                f"tamaño cripto calculado="
+                f"{cantidad_riesgo:.6f} | "
+                f"limitado={cantidad:.6f} | "
+                f"notional="
+                f"${cantidad * precio:,.2f}"
+            )
+
+            return cantidad
+
+        # ====================================================
+        # ACCIONES
+        # ====================================================
+
+        cantidad = int(
+            riesgo_dolares /
+            riesgo_por_unidad
+        )
+
+        return max(cantidad, 0)
+
+    except Exception as e:
+
+        log.error(
+            f"Error calculando tamaño de posición "
+            f"para {ticker}: {e}"
+        )
 
         return 0
 
-    if es_cripto(ticker):
 
-        cantidad = round(
-            riesgo_dolares
-            / riesgo_por_unidad,
-            6,
-        )
-
-        return max(
-            cantidad,
-            0,
-        )
-
-    return max(
-        int(
-            riesgo_dolares
-            / riesgo_por_unidad
-        ),
-        0,
-    )
-
-
-# =========================================================
+# ============================================================
 # COMPRAR
-# =========================================================
+# ============================================================
 
-def comprar(
-    ticker: str,
-    precio: float,
-    atr: float,
-) -> str | None:
+def comprar(ticker, precio, atr):
+    """Ejecuta una compra."""
 
-    cantidad = calcular_tamano_posicion(
-        ticker,
-        precio,
-        atr,
-    )
+    try:
 
-    if cantidad <= 0:
-
-        log.warning(
-            f"{ticker}: tamano de posicion "
-            f"calculado es 0."
+        cantidad = calcular_tamano_posicion(
+            ticker,
+            precio,
+            atr,
         )
 
-        return None
+        if cantidad <= 0:
 
-    # -----------------------------------------------------
-    # CRIPTO
-    # -----------------------------------------------------
+            log.warning(
+                f"{ticker}: tamaño de posición inválido"
+            )
 
-    if es_cripto(ticker):
+            return None
+
+        # ====================================================
+        # CRIPTO
+        # ====================================================
+
+        if es_cripto(ticker):
+
+            orden = MarketOrderRequest(
+                symbol=ticker,
+                qty=cantidad,
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC,
+            )
+
+            resultado = (
+                cliente_trading.submit_order(
+                    order_data=orden
+                )
+            )
+
+            log.info(
+                f"COMPRA {ticker}: "
+                f"{cantidad} unidades "
+                f"(mercado)"
+            )
+
+            return resultado
+
+        # ====================================================
+        # ACCIONES
+        # ====================================================
+
+        stop_loss_pct = float(
+            config.STOP_LOSS_PCT
+        )
+
+        take_profit_pct = float(
+            config.TAKE_PROFIT_PCT
+        )
+
+        precio_sl = precio * (
+            1 - stop_loss_pct
+        )
+
+        precio_tp = precio * (
+            1 + take_profit_pct
+        )
 
         orden = MarketOrderRequest(
             symbol=ticker,
             qty=cantidad,
             side=OrderSide.BUY,
-            time_in_force=TimeInForce.GTC,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            stop_loss=StopLossRequest(
+                stop_price=round(
+                    precio_sl,
+                    2,
+                )
+            ),
+            take_profit=TakeProfitRequest(
+                limit_price=round(
+                    precio_tp,
+                    2,
+                )
+            ),
         )
 
-        trading_client.submit_order(
-            orden
+        resultado = (
+            cliente_trading.submit_order(
+                order_data=orden
+            )
         )
 
-        mensaje = (
+        log.info(
             f"COMPRA {ticker}: "
-            f"{cantidad} unidades "
-            f"@ ~${precio:.2f} "
-            f"(SL/TP manual)"
+            f"{cantidad} acciones | "
+            f"SL ${precio_sl:.2f} | "
+            f"TP ${precio_tp:.2f}"
         )
 
-        log.info(mensaje)
-
-        return mensaje
-
-    # -----------------------------------------------------
-    # ACCIONES - BRACKET
-    # -----------------------------------------------------
-
-    stop_loss = round(
-        precio
-        - atr
-        * config.ATR_STOP_MULTIPLICADOR,
-        2,
-    )
-
-    take_profit = round(
-        precio
-        + atr
-        * config.ATR_TAKE_PROFIT_MULTIPLICADOR,
-        2,
-    )
-
-    stop_loss = max(
-        stop_loss,
-        0.01,
-    )
-
-    if stop_loss >= precio:
-
-        log.error(
-            f"{ticker}: SL invalido "
-            f"(${stop_loss}) >= "
-            f"entrada (${precio})."
-        )
-
-        return None
-
-    if take_profit <= precio:
-
-        log.error(
-            f"{ticker}: TP invalido "
-            f"(${take_profit}) <= "
-            f"entrada (${precio})."
-        )
-
-        return None
-
-    orden = MarketOrderRequest(
-        symbol=ticker,
-        qty=cantidad,
-        side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY,
-        order_class=OrderClass.BRACKET,
-        stop_loss=StopLossRequest(
-            stop_price=stop_loss
-        ),
-        take_profit=TakeProfitRequest(
-            limit_price=take_profit
-        ),
-    )
-
-    trading_client.submit_order(
-        orden
-    )
-
-    mensaje = (
-        f"COMPRA {ticker}: "
-        f"{cantidad} acciones "
-        f"@ ~${precio:.2f} "
-        f"(SL: ${stop_loss:.2f} | "
-        f"TP: ${take_profit:.2f})"
-    )
-
-    log.info(mensaje)
-
-    return mensaje
-
-
-# =========================================================
-# PROTEGER POSICION EXISTENTE
-# =========================================================
-
-def proteger_posicion(
-    ticker: str,
-    atr: float,
-) -> str | None:
-
-    if es_cripto(ticker):
-        return None
-
-    posicion = obtener_posicion(
-        ticker
-    )
-
-    if posicion is None:
-        return None
-
-    try:
-
-        cantidad = float(
-            posicion.qty
-        )
-
-        precio_entrada = float(
-            posicion.avg_entry_price
-        )
+        return resultado
 
     except Exception as e:
 
         log.error(
-            f"{ticker}: no se pudo leer "
-            f"la posicion: {e}"
+            f"{ticker}: error ejecutando compra: {e}"
         )
 
         return None
 
-    if cantidad <= 0:
-        return None
 
-    # -----------------------------------------------------
-    # COMPROBAR PROTECCION ANTES DE HACER NADA
-    # -----------------------------------------------------
+# ============================================================
+# VENDER
+# ============================================================
 
-    tiene_sl, tiene_tp = tiene_proteccion(
-        ticker
-    )
+def vender(ticker):
+    """Cierra una posición."""
 
-    if tiene_sl and tiene_tp:
+    try:
 
-        log.info(
-            f"{ticker}: posicion ya protegida "
-            f"(SL OK | TP OK)."
+        simbolo = ticker.replace("/", "")
+
+        posicion = cliente_trading.get_open_position(
+            simbolo
         )
 
-        return None
+        qty = float(posicion.qty)
 
-    # -----------------------------------------------------
-    # SI FALTA ALGUNA PROTECCION, LIMPIAR SOLO LAS
-    # ORDENES DE VENTA ABIERTAS Y CREAR UNA OCO NUEVA
-    # -----------------------------------------------------
+        # ----------------------------------------------------
+        # CANCELAR ÓRDENES ABIERTAS
+        # ----------------------------------------------------
 
-    ordenes = obtener_ordenes_abiertas(
-        ticker
-    )
+        ordenes = obtener_ordenes_abiertas(ticker)
 
-    for orden in ordenes:
+        for orden in ordenes:
 
-        try:
+            try:
 
-            side = str(
-                getattr(
-                    orden,
-                    "side",
-                    "",
-                )
-            ).lower()
-
-            if "sell" in side:
-
-                trading_client.cancel_order_by_id(
+                cliente_trading.cancel_order_by_id(
                     orden.id
                 )
 
-        except Exception as e:
+            except Exception as e:
 
-            log.warning(
-                f"{ticker}: no se pudo cancelar "
-                f"orden {getattr(orden, 'id', '?')}: {e}"
-            )
+                log.warning(
+                    f"{ticker}: error cancelando "
+                    f"orden {orden.id}: {e}"
+                )
 
-    stop_loss = round(
-        precio_entrada
-        - atr
-        * config.ATR_STOP_MULTIPLICADOR,
-        2,
-    )
+        # ----------------------------------------------------
+        # CERRAR POSICIÓN
+        # ----------------------------------------------------
 
-    take_profit = round(
-        precio_entrada
-        + atr
-        * config.ATR_TAKE_PROFIT_MULTIPLICADOR,
-        2,
-    )
-
-    stop_loss = max(
-        stop_loss,
-        0.01,
-    )
-
-    if stop_loss >= precio_entrada:
-
-        log.error(
-            f"{ticker}: SL calculado invalido."
-        )
-
-        return None
-
-    if take_profit <= precio_entrada:
-
-        log.error(
-            f"{ticker}: TP calculado invalido."
-        )
-
-        return None
-
-    try:
-
-        orden = LimitOrderRequest(
+        orden = MarketOrderRequest(
             symbol=ticker,
-            qty=cantidad,
+            qty=qty,
             side=OrderSide.SELL,
-            time_in_force=TimeInForce.GTC,
-            order_class=OrderClass.OCO,
-            take_profit=TakeProfitRequest(
-                limit_price=take_profit
-            ),
-            stop_loss=StopLossRequest(
-                stop_price=stop_loss
+            time_in_force=(
+                TimeInForce.GTC
+                if es_cripto(ticker)
+                else TimeInForce.DAY
             ),
         )
 
-        trading_client.submit_order(
-            orden
-        )
-
-        mensaje = (
-            f"PROTECCION {ticker}: "
-            f"SL ${stop_loss:.2f} | "
-            f"TP ${take_profit:.2f} "
-            f"(entrada "
-            f"${precio_entrada:.2f})"
-        )
-
-        log.info(mensaje)
-
-        return mensaje
-
-    except Exception as e:
-
-        log.error(
-            f"{ticker}: ERROR creando "
-            f"proteccion: {e}"
-        )
-
-        return None
-
-
-# =========================================================
-# CANCELAR ORDENES
-# =========================================================
-
-def _cancelar_ordenes_abiertas(
-    ticker: str,
-) -> None:
-
-    ordenes = obtener_ordenes_abiertas(
-        ticker
-    )
-
-    for orden in ordenes:
-
-        try:
-
-            trading_client.cancel_order_by_id(
-                orden.id
+        resultado = (
+            cliente_trading.submit_order(
+                order_data=orden
             )
-
-        except Exception as e:
-
-            log.warning(
-                f"No se pudo cancelar "
-                f"orden {orden.id} "
-                f"de {ticker}: {e}"
-            )
-
-
-# =========================================================
-# VENDER
-# =========================================================
-
-def vender(
-    ticker: str,
-) -> str | None:
-
-    try:
-
-        _cancelar_ordenes_abiertas(
-            ticker
         )
 
-        trading_client.close_position(
-            ticker.replace("/", "")
-        )
-
-        mensaje = (
+        log.info(
             f"VENTA {ticker}: "
-            f"posicion cerrada."
+            f"{qty} unidades"
         )
 
-        log.info(mensaje)
-
-        return mensaje
+        return resultado
 
     except Exception as e:
 
         log.error(
-            f"Error al vender "
-            f"{ticker}: {e}"
+            f"{ticker}: error ejecutando venta: {e}"
         )
 
         return None
 
 
-# =========================================================
-# MONITOR DE ORDENES EJECUTADAS
-# =========================================================
+# ============================================================
+# MONITOR DE EJECUCIONES
+# ============================================================
 
 _ordenes_notificadas = set()
+
 _monitor_ejecuciones_inicializado = False
 
 
 def obtener_ordenes_ejecutadas():
+    """
+    Obtiene órdenes FILLED recientes.
+    """
 
     try:
 
-        filtro = GetOrdersRequest(
-            status=QueryOrderStatus.CLOSED,
-            limit=50,
+        ordenes = cliente_trading.get_orders(
+            filter="closed",
+            limit=100,
         )
 
-        ordenes = trading_client.get_orders(
-            filter=filtro
-        )
+        ejecutadas = []
 
-        return [
-            orden
-            for orden in ordenes
-            if str(
+        for orden in ordenes:
+
+            status = str(
                 getattr(
                     orden,
                     "status",
-                    "",
+                    ""
                 )
-            ).lower().endswith("filled")
-        ]
+            ).lower()
+
+            if status == "filled":
+                ejecutadas.append(orden)
+
+        return ejecutadas
 
     except Exception as e:
 
         log.error(
-            f"Error consultando "
-            f"ordenes ejecutadas: {e}"
+            f"[ejecuciones] "
+            f"Error obteniendo ejecuciones: {e}"
         )
 
         return []
 
 
 def inicializar_monitor_ejecuciones():
+    """
+    Marca como antiguas todas las órdenes ya ejecutadas
+    cuando arranca el bot.
+    """
 
     global _monitor_ejecuciones_inicializado
 
     if _monitor_ejecuciones_inicializado:
         return
 
-    ordenes = obtener_ordenes_ejecutadas()
+    try:
 
-    for orden in ordenes:
+        ordenes = obtener_ordenes_ejecutadas()
 
-        try:
+        for orden in ordenes:
 
             _ordenes_notificadas.add(
                 str(orden.id)
             )
 
-        except Exception:
+        _monitor_ejecuciones_inicializado = True
 
-            continue
+        log.info(
+            "[ejecuciones] Monitor inicializado. "
+            f"{len(ordenes)} ordenes antiguas ignoradas."
+        )
 
-    _monitor_ejecuciones_inicializado = True
+    except Exception as e:
 
-    log.info(
-        f"[ejecuciones] Monitor inicializado. "
-        f"{len(_ordenes_notificadas)} "
-        f"ordenes antiguas ignoradas."
-    )
+        log.error(
+            f"[ejecuciones] "
+            f"Error inicializando monitor: {e}"
+        )
 
 
 def detectar_ejecuciones():
+    """
+    Detecta nuevas órdenes ejecutadas.
+
+    Devuelve una lista de mensajes.
+    """
+
+    global _monitor_ejecuciones_inicializado
+
+    if not _monitor_ejecuciones_inicializado:
+
+        inicializar_monitor_ejecuciones()
+
+        return []
 
     mensajes = []
 
-    ordenes = obtener_ordenes_ejecutadas()
+    try:
 
-    for orden in ordenes:
+        ordenes = obtener_ordenes_ejecutadas()
 
-        try:
+        for orden in ordenes:
 
-            order_id = str(
-                orden.id
-            )
+            order_id = str(orden.id)
 
             if order_id in _ordenes_notificadas:
                 continue
-
-            side = str(
-                getattr(
-                    orden,
-                    "side",
-                    "",
-                )
-            ).lower()
-
-            if "buy" in side:
-
-                emoji = "🟢"
-                accion = "COMPRA"
-
-            elif "sell" in side:
-
-                emoji = "🔴"
-                accion = "VENTA"
-
-            else:
-
-                continue
-
-            ticker = str(
-                getattr(
-                    orden,
-                    "symbol",
-                    "?",
-                )
-            )
-
-            cantidad = getattr(
-                orden,
-                "filled_qty",
-                None,
-            )
-
-            precio = getattr(
-                orden,
-                "filled_avg_price",
-                None,
-            )
-
-            if cantidad is not None:
-
-                try:
-
-                    cantidad = float(
-                        cantidad
-                    )
-
-                    cantidad_txt = (
-                        f"{cantidad:g}"
-                    )
-
-                except Exception:
-
-                    cantidad_txt = str(
-                        cantidad
-                    )
-
-            else:
-
-                cantidad_txt = "?"
-
-            if precio is not None:
-
-                try:
-
-                    precio = float(
-                        precio
-                    )
-
-                    precio_txt = (
-                        f"${precio:.2f}"
-                    )
-
-                except Exception:
-
-                    precio_txt = str(
-                        precio
-                    )
-
-            else:
-
-                precio_txt = (
-                    "precio desconocido"
-                )
-
-            mensaje = (
-                f"{emoji} {accion} EJECUTADA\n"
-                f"📊 {ticker}\n"
-                f"📦 Cantidad: "
-                f"{cantidad_txt}\n"
-                f"💰 Precio: "
-                f"{precio_txt}\n"
-                f"🆔 Orden: "
-                f"{order_id[:8]}"
-            )
-
-            mensajes.append(
-                mensaje
-            )
 
             _ordenes_notificadas.add(
                 order_id
             )
 
-        except Exception as e:
+            side = str(
+                getattr(
+                    orden,
+                    "side",
+                    ""
+                )
+            ).lower()
 
-            log.warning(
-                "No se pudo procesar "
-                f"una orden ejecutada: {e}"
+            simbolo = getattr(
+                orden,
+                "symbol",
+                ""
             )
 
-    return mensajes
+            qty = getattr(
+                orden,
+                "filled_qty",
+                None
+            )
+
+            precio = getattr(
+                orden,
+                "filled_avg_price",
+                None
+            )
+
+            if side == "buy":
+
+                emoji = "🟢"
+                tipo = "COMPRA"
+
+            elif side == "sell":
+
+                emoji = "🔴"
+                tipo = "VENTA"
+
+            else:
+
+                emoji = "⚪"
+                tipo = side.upper()
+
+            mensaje = (
+                f"{emoji} {tipo} EJECUTADA\n"
+                f"Ticker: {simbolo}\n"
+                f"Cantidad: {qty}\n"
+                f"Precio: ${precio}\n"
+                f"Order ID: {order_id}"
+            )
+
+            mensajes.append(mensaje)
+
+            log.info(
+                f"[ejecuciones] "
+                f"{tipo} {simbolo} "
+                f"qty={qty} "
+                f"precio={precio}"
+            )
+
+        return mensajes
+
+    except Exception as e:
+
+        log.error(
+            f"[ejecuciones] "
+            f"Error detectando ejecuciones: {e}"
+        )
+
+        return []
