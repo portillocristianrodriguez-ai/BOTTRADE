@@ -4,12 +4,18 @@ estrategia.py
 Motor de señales del bot.
 
 Gestiona:
+
 - Indicadores técnicos
 - Acciones
 - Cripto
 - Señales de COMPRA / VENTA / ESPERAR
-- Scanner crypto 24/7
-- Detección de impulso inicial
+- Scanner de impulso crypto
+- Score de oportunidad crypto
+
+IMPORTANTE:
+La estrategia no garantiza detectar el inicio exacto
+de una subida. Busca confirmar impulso temprano
+mediante varios factores simultáneos.
 """
 
 import pandas as pd
@@ -62,7 +68,14 @@ def calcular_indicadores(df):
 
     df["macd"] = macd.macd()
 
-    df["macd_signal"] = macd.macd_signal()
+    df["macd_signal"] = (
+        macd.macd_signal()
+    )
+
+    df["macd_hist"] = (
+        df["macd"]
+        - df["macd_signal"]
+    )
 
     df["volumen_media"] = (
         df["volume"]
@@ -77,57 +90,11 @@ def calcular_indicadores(df):
         / df["volumen_media"]
     )
 
-    # ========================================================
-    # DATOS PARA SCANNER
-    # ========================================================
-
-    df["cambio_1"] = (
-        df["close"]
-        .pct_change(1)
-    )
-
-    df["cambio_3"] = (
-        df["close"]
-        .pct_change(3)
-    )
-
-    df["cambio_6"] = (
-        df["close"]
-        .pct_change(6)
-    )
-
-    df["maximo_6"] = (
-        df["high"]
-        .rolling(6)
-        .max()
-        .shift(1)
-    )
-
-    df["maximo_12"] = (
-        df["high"]
-        .rolling(12)
-        .max()
-        .shift(1)
-    )
-
-    df["pendiente_ema_rapida"] = (
-        df["ema_rapida"]
-        .pct_change(3)
-    )
-
-    df["separacion_emas"] = (
-        (
-            df["ema_rapida"]
-            - df["ema_lenta"]
-        )
-        / df["close"]
-    )
-
     return df
 
 
 # ============================================================
-# VALIDAR DATOS
+# DATOS VÁLIDOS
 # ============================================================
 
 def _datos_validos(
@@ -152,16 +119,21 @@ def _datos_validos(
 # SEÑAL ACCIONES
 # ============================================================
 
-def _generar_senal_acciones(df):
+def _generar_senal_acciones(
+    df,
+):
 
     minimo_velas = (
-        config.EMA_TENDENCIA + 2
+        config.EMA_TENDENCIA
+        + 2
     )
 
     if len(df) < minimo_velas:
+
         return "ESPERAR"
 
     actual = df.iloc[-1]
+
     anterior = df.iloc[-2]
 
     columnas = [
@@ -179,6 +151,7 @@ def _generar_senal_acciones(df):
         actual,
         columnas,
     ):
+
         return "ESPERAR"
 
     if not _datos_validos(
@@ -192,7 +165,12 @@ def _generar_senal_acciones(df):
             "macd_signal",
         ],
     ):
+
         return "ESPERAR"
+
+    # --------------------------------------------------------
+    # TENDENCIA
+    # --------------------------------------------------------
 
     tendencia_alcista = (
         actual["close"]
@@ -203,6 +181,10 @@ def _generar_senal_acciones(df):
         actual["close"]
         < actual["ema_tendencia"]
     )
+
+    # --------------------------------------------------------
+    # EMA
+    # --------------------------------------------------------
 
     emas_alcistas = (
         actual["ema_rapida"]
@@ -230,6 +212,10 @@ def _generar_senal_acciones(df):
         < actual["ema_lenta"]
     )
 
+    # --------------------------------------------------------
+    # MACD
+    # --------------------------------------------------------
+
     macd_alcista = (
         actual["macd"]
         > actual["macd_signal"]
@@ -239,6 +225,10 @@ def _generar_senal_acciones(df):
         actual["macd"]
         < actual["macd_signal"]
     )
+
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
 
     rsi = float(
         actual["rsi"]
@@ -250,10 +240,18 @@ def _generar_senal_acciones(df):
         <= config.RSI_SOBRECOMPRA
     )
 
+    # --------------------------------------------------------
+    # VOLUMEN
+    # --------------------------------------------------------
+
     volumen_ok = (
         actual["volumen_ratio"]
         >= config.VOLUMEN_MIN_MULTIPLICADOR
     )
+
+    # --------------------------------------------------------
+    # ATR
+    # --------------------------------------------------------
 
     atr_pct = (
         actual["atr"]
@@ -265,6 +263,10 @@ def _generar_senal_acciones(df):
         >= config.ATR_MIN_PCT
     )
 
+    # --------------------------------------------------------
+    # COMPRA FUERTE
+    # --------------------------------------------------------
+
     compra_fuerte = (
         tendencia_alcista
         and emas_alcistas
@@ -273,6 +275,10 @@ def _generar_senal_acciones(df):
         and volumen_ok
         and volatilidad_ok
     )
+
+    # --------------------------------------------------------
+    # CRUCE EMA
+    # --------------------------------------------------------
 
     compra_cruce = (
         cruce_ema_alcista
@@ -283,10 +289,20 @@ def _generar_senal_acciones(df):
         and volatilidad_ok
     )
 
-    if compra_fuerte or compra_cruce:
+    if (
+        compra_fuerte
+        or compra_cruce
+    ):
+
         return "COMPRAR"
 
-    margen = config.MARGEN_SALIDA_PCT
+    # --------------------------------------------------------
+    # VENTAS
+    # --------------------------------------------------------
+
+    margen = (
+        config.MARGEN_SALIDA_PCT
+    )
 
     umbral_salida = (
         actual["ema_tendencia"]
@@ -316,23 +332,28 @@ def _generar_senal_acciones(df):
         or venta_ema
         or venta_fuerte
     ):
+
         return "VENDER"
 
     return "ESPERAR"
 
 
 # ============================================================
-# SEÑAL CRYPTO NORMAL
+# SEÑAL CRYPTO
 # ============================================================
 
-def _generar_senal_cripto(df):
+def _generar_senal_cripto(
+    df,
+):
 
     minimo_velas = 50
 
     if len(df) < minimo_velas:
+
         return "ESPERAR"
 
     actual = df.iloc[-1]
+
     anterior = df.iloc[-2]
 
     columnas = [
@@ -350,7 +371,12 @@ def _generar_senal_cripto(df):
         actual,
         columnas,
     ):
+
         return "ESPERAR"
+
+    # --------------------------------------------------------
+    # TENDENCIA
+    # --------------------------------------------------------
 
     tendencia_alcista = (
         actual["close"]
@@ -362,6 +388,10 @@ def _generar_senal_cripto(df):
         < actual["ema_tendencia"]
     )
 
+    # --------------------------------------------------------
+    # EMA
+    # --------------------------------------------------------
+
     emas_alcistas = (
         actual["ema_rapida"]
         > actual["ema_lenta"]
@@ -371,6 +401,10 @@ def _generar_senal_cripto(df):
         actual["ema_rapida"]
         < actual["ema_lenta"]
     )
+
+    # --------------------------------------------------------
+    # MACD
+    # --------------------------------------------------------
 
     macd_alcista = (
         actual["macd"]
@@ -382,18 +416,32 @@ def _generar_senal_cripto(df):
         < actual["macd_signal"]
     )
 
+    # --------------------------------------------------------
+    # RSI
+    # --------------------------------------------------------
+
     rsi = float(
         actual["rsi"]
     )
 
     entrada_rsi = (
-        45 <= rsi <= 68
+        45
+        <= rsi
+        <= 68
     )
+
+    # --------------------------------------------------------
+    # VOLUMEN
+    # --------------------------------------------------------
 
     volumen_ok = (
         actual["volumen_ratio"]
         >= config.VOLUMEN_MIN_MULTIPLICADOR
     )
+
+    # --------------------------------------------------------
+    # ATR
+    # --------------------------------------------------------
 
     atr_pct = (
         actual["atr"]
@@ -405,10 +453,18 @@ def _generar_senal_cripto(df):
         >= config.ATR_MIN_PCT
     )
 
+    # --------------------------------------------------------
+    # PRECIO SOBRE EMA
+    # --------------------------------------------------------
+
     precio_sobre_ema = (
         actual["close"]
         > actual["ema_rapida"]
     )
+
+    # --------------------------------------------------------
+    # ENTRADA PRINCIPAL
+    # --------------------------------------------------------
 
     entrada_principal = (
         tendencia_alcista
@@ -419,6 +475,10 @@ def _generar_senal_cripto(df):
         and volumen_ok
         and volatilidad_ok
     )
+
+    # --------------------------------------------------------
+    # CRUCE EMA
+    # --------------------------------------------------------
 
     cruce_ema_alcista = (
         anterior["ema_rapida"]
@@ -441,7 +501,12 @@ def _generar_senal_cripto(df):
         entrada_principal
         or entrada_cruce
     ):
+
         return "COMPRAR"
+
+    # --------------------------------------------------------
+    # VENTAS
+    # --------------------------------------------------------
 
     cruce_ema_bajista = (
         anterior["ema_rapida"]
@@ -466,74 +531,68 @@ def _generar_senal_cripto(df):
         salida_tendencia
         or salida_momentum
     ):
+
         return "VENDER"
 
     return "ESPERAR"
 
 
 # ============================================================
-# SCANNER CRYPTO — ANÁLISIS DE IMPULSO
+# SCANNER CRYPTO — ANALIZAR IMPULSO
 # ============================================================
 
 def analizar_impulso_crypto(
     df,
-    ticker="?",
+    ticker,
 ):
-    """
-    Analiza si una crypto está comenzando
-    un movimiento alcista.
-
-    Devuelve un diccionario con:
-
-        score
-        comprar
-        precio
-        rsi
-        volumen_ratio
-        momentum_pct
-        ruptura
-        tendencia
-        motivo
-
-    El objetivo NO es comprar simplemente
-    porque el precio esté subiendo.
-
-    Busca coincidencia de varias señales.
-    """
 
     resultado = {
-        "ticker": ticker,
         "score": 0.0,
         "comprar": False,
-        "precio": None,
-        "rsi": None,
-        "volumen_ratio": None,
-        "momentum_pct": None,
-        "ruptura": False,
-        "tendencia": False,
         "motivo": [],
+        "rsi": 0.0,
+        "volumen_ratio": 0.0,
+        "momentum_pct": 0.0,
+        "atr_pct": 0.0,
+        "breakout": False,
     }
 
     try:
 
+        if df is None or df.empty:
+
+            return resultado
+
+        # ----------------------------------------------------
+        # MÍNIMO DE VELAS
+        # ----------------------------------------------------
+
         minimo_velas = max(
-            50,
-            config.EMA_TENDENCIA + 2,
+            220,
+            config.EMA_TENDENCIA + 5,
         )
 
         if len(df) < minimo_velas:
 
-            resultado["motivo"].append(
-                "pocas velas"
+            return resultado
+
+        datos = (
+            calcular_indicadores(
+                df
             )
+        )
+
+        if len(datos) < minimo_velas:
 
             return resultado
 
-        df = calcular_indicadores(
-            df
-        )
+        actual = datos.iloc[-1]
 
-        actual = df.iloc[-1]
+        anterior = datos.iloc[-2]
+
+        # ----------------------------------------------------
+        # DATOS FUNDAMENTALES
+        # ----------------------------------------------------
 
         columnas = [
             "close",
@@ -543,15 +602,9 @@ def analizar_impulso_crypto(
             "rsi",
             "macd",
             "macd_signal",
+            "macd_hist",
             "atr",
             "volumen_ratio",
-            "cambio_1",
-            "cambio_3",
-            "cambio_6",
-            "maximo_6",
-            "maximo_12",
-            "pendiente_ema_rapida",
-            "separacion_emas",
         ]
 
         if not _datos_validos(
@@ -559,347 +612,544 @@ def analizar_impulso_crypto(
             columnas,
         ):
 
-            resultado["motivo"].append(
-                "indicadores incompletos"
-            )
-
             return resultado
 
         precio = float(
             actual["close"]
         )
 
+        if precio <= 0:
+
+            return resultado
+
+        # ----------------------------------------------------
+        # RSI
+        # ----------------------------------------------------
+
         rsi = float(
             actual["rsi"]
         )
+
+        # ----------------------------------------------------
+        # VOLUMEN
+        # ----------------------------------------------------
 
         volumen_ratio = float(
             actual["volumen_ratio"]
         )
 
+        # ----------------------------------------------------
+        # ATR
+        # ----------------------------------------------------
+
         atr = float(
             actual["atr"]
         )
 
-        cambio_1 = float(
-            actual["cambio_1"]
+        atr_pct = (
+            atr
+            / precio
+            * 100
         )
 
-        cambio_3 = float(
-            actual["cambio_3"]
+        # ----------------------------------------------------
+        # MOMENTUM
+        # ----------------------------------------------------
+
+        momentum_bars = max(
+            1,
+            int(
+                config.CRYPTO_MOMENTUM_BARS
+            ),
         )
 
-        cambio_6 = float(
-            actual["cambio_6"]
-        )
+        if len(datos) <= momentum_bars:
 
-        pendiente_ema = float(
-            actual["pendiente_ema_rapida"]
-        )
+            return resultado
 
-        separacion_emas = float(
-            actual["separacion_emas"]
-        )
-
-        resultado["precio"] = precio
-        resultado["rsi"] = rsi
-        resultado["volumen_ratio"] = volumen_ratio
-        resultado["momentum_pct"] = (
-            cambio_3 * 100
-        )
-
-        score = 0.0
-        motivos = []
-
-        # ====================================================
-        # 1. TENDENCIA
-        # ====================================================
-
-        tendencia = (
-            precio
-            > float(actual["ema_tendencia"])
-        )
-
-        resultado["tendencia"] = tendencia
-
-        if tendencia:
-
-            score += 15
-            motivos.append(
-                "precio sobre EMA tendencia"
+        precio_anterior_momentum = (
+            float(
+                datos.iloc[
+                    -1
+                    - momentum_bars
+                ]["close"]
             )
-
-        # ====================================================
-        # 2. EMA RÁPIDA > EMA LENTA
-        # ====================================================
-
-        emas_alcistas = (
-            float(actual["ema_rapida"])
-            > float(actual["ema_lenta"])
         )
-
-        if emas_alcistas:
-
-            score += 12
-            motivos.append(
-                "EMA rápida > EMA lenta"
-            )
-
-        # ====================================================
-        # 3. PENDIENTE EMA
-        # ====================================================
-
-        if pendiente_ema > 0:
-
-            score += 10
-            motivos.append(
-                "EMA rápida subiendo"
-            )
-
-        # ====================================================
-        # 4. SEPARACIÓN DE EMAS
-        # ====================================================
-
-        if separacion_emas > 0:
-
-            score += 5
-            motivos.append(
-                "momentum EMA positivo"
-            )
-
-        # ====================================================
-        # 5. MACD
-        # ====================================================
-
-        macd_alcista = (
-            float(actual["macd"])
-            > float(actual["macd_signal"])
-        )
-
-        if macd_alcista:
-
-            score += 12
-            motivos.append(
-                "MACD alcista"
-            )
-
-        # ====================================================
-        # 6. RSI
-        # ====================================================
 
         if (
+            precio_anterior_momentum
+            <= 0
+        ):
+
+            return resultado
+
+        momentum_pct = (
+            (
+                precio
+                - precio_anterior_momentum
+            )
+            / precio_anterior_momentum
+        ) * 100
+
+        # ----------------------------------------------------
+        # SLOPE EMA RÁPIDA
+        # ----------------------------------------------------
+
+        if len(datos) >= 4:
+
+            ema_3_barras = float(
+                datos.iloc[-4][
+                    "ema_rapida"
+                ]
+            )
+
+            ema_slope_pct = (
+                (
+                    float(
+                        actual[
+                            "ema_rapida"
+                        ]
+                    )
+                    - ema_3_barras
+                )
+                / ema_3_barras
+            ) * 100
+
+        else:
+
+            ema_slope_pct = 0.0
+
+        # ----------------------------------------------------
+        # BREAKOUT
+        # ----------------------------------------------------
+
+        lookback = max(
+            2,
+            int(
+                config.CRYPTO_BREAKOUT_LOOKBACK
+            ),
+        )
+
+        if len(datos) <= lookback:
+
+            return resultado
+
+        maximo_previo = (
+            datos[
+                "high"
+            ]
+            .shift(1)
+            .rolling(
+                lookback
+            )
+            .max()
+            .iloc[-1]
+        )
+
+        if pd.isna(
+            maximo_previo
+        ):
+
+            return resultado
+
+        maximo_previo = float(
+            maximo_previo
+        )
+
+        breakout = (
+            precio
+            > maximo_previo
+        )
+
+        # ----------------------------------------------------
+        # MACD HISTOGRAMA
+        # ----------------------------------------------------
+
+        macd_hist = float(
+            actual["macd_hist"]
+        )
+
+        macd_hist_anterior = float(
+            anterior["macd_hist"]
+        )
+
+        macd_hist_positivo = (
+            macd_hist > 0
+        )
+
+        macd_hist_creciendo = (
+            macd_hist
+            > macd_hist_anterior
+        )
+
+        # ----------------------------------------------------
+        # EMA
+        # ----------------------------------------------------
+
+        ema_rapida = float(
+            actual["ema_rapida"]
+        )
+
+        ema_lenta = float(
+            actual["ema_lenta"]
+        )
+
+        ema_tendencia = float(
+            actual["ema_tendencia"]
+        )
+
+        # ----------------------------------------------------
+        # CONDICIONES
+        # ----------------------------------------------------
+
+        precio_sobre_tendencia = (
+            precio
+            > ema_tendencia
+        )
+
+        emas_alineadas = (
+            ema_rapida
+            > ema_lenta
+        )
+
+        slope_positivo = (
+            ema_slope_pct
+            > 0
+        )
+
+        volumen_fuerte = (
+            volumen_ratio
+            >= config.CRYPTO_VOLUME_MIN_MULTIPLICADOR
+        )
+
+        volumen_medio = (
+            volumen_ratio
+            >= 1.20
+        )
+
+        momentum_minimo = (
+            momentum_pct
+            >= config.CRYPTO_MIN_MOMENTUM_PCT
+        )
+
+        momentum_positivo = (
+            momentum_pct > 0
+        )
+
+        rsi_en_zona = (
             config.CRYPTO_RSI_MIN
             <= rsi
             <= config.CRYPTO_RSI_MAX
-        ):
+        )
 
-            score += 12
+        volatilidad_ok = (
+            atr_pct
+            >= (
+                config.ATR_MIN_PCT
+                * 100
+            )
+        )
+
+        # ----------------------------------------------------
+        # MOVIMIENTO DEMASIADO EXTENDIDO
+        # ----------------------------------------------------
+
+        subida_maxima = (
+            momentum_pct
+            <= config.CRYPTO_MAX_RISE_PCT
+        )
+
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
+        score = 0.0
+
+        motivos = []
+
+        # Precio sobre EMA tendencia
+        if precio_sobre_tendencia:
+
+            score += 10
+
+            motivos.append(
+                "precio > EMA tendencia"
+            )
+
+        # EMA rápida > lenta
+        if emas_alineadas:
+
+            score += 15
+
+            motivos.append(
+                "EMA9 > EMA21"
+            )
+
+        # Pendiente EMA positiva
+        if slope_positivo:
+
+            score += 10
+
+            motivos.append(
+                "EMA acelerando"
+            )
+
+        # Ruptura
+        if breakout:
+
+            score += 20
+
+            motivos.append(
+                "breakout"
+            )
+
+        # Volumen fuerte
+        if volumen_fuerte:
+
+            score += 20
+
+            motivos.append(
+                "volumen fuerte"
+            )
+
+        elif volumen_medio:
+
+            score += 10
+
+            motivos.append(
+                "volumen creciente"
+            )
+
+        # RSI
+        if rsi_en_zona:
+
+            score += 10
+
             motivos.append(
                 "RSI saludable"
             )
 
-        elif rsi > config.CRYPTO_RSI_MAX:
-
-            score -= 10
-            motivos.append(
-                "RSI demasiado alto"
-            )
-
-        else:
-
-            score -= 5
-            motivos.append(
-                "RSI débil"
-            )
-
-        # ====================================================
-        # 7. VOLUMEN
-        # ====================================================
-
-        if (
-            volumen_ratio
-            >= config.CRYPTO_VOLUMEN_MIN_MULTIPLICADOR
+        elif (
+            rsi
+            > config.CRYPTO_RSI_MAX
+            and rsi <= 75
         ):
 
-            score += 15
+            score += 3
+
             motivos.append(
-                "volumen aumentado"
+                "RSI elevado"
             )
 
-        # ====================================================
-        # 8. MOMENTUM
-        # ====================================================
+        # MACD
+        if macd_hist_positivo:
 
-        momentum_ok = (
-            cambio_3 * 100
-            >= config.CRYPTO_MOMENTUM_MIN_PCT
-        )
+            score += 5
 
-        if momentum_ok:
+            motivos.append(
+                "MACD positivo"
+            )
 
-            score += 8
+        if macd_hist_creciendo:
+
+            score += 5
+
+            motivos.append(
+                "MACD creciendo"
+            )
+
+        # Momentum
+        if momentum_minimo:
+
+            score += 5
+
             motivos.append(
                 "momentum positivo"
             )
 
-        # ====================================================
-        # 9. RUPTURA
-        # ====================================================
+        elif momentum_positivo:
 
-        ruptura = False
-
-        maximo_6 = float(
-            actual["maximo_6"]
-        )
-
-        maximo_12 = float(
-            actual["maximo_12"]
-        )
-
-        if precio > maximo_6:
-
-            ruptura = True
-
-            score += 10
-            motivos.append(
-                "ruptura máximo reciente"
-            )
-
-        elif precio > maximo_12:
-
-            ruptura = True
-
-            score += 8
-            motivos.append(
-                "ruptura máximo 12 velas"
-            )
-
-        resultado["ruptura"] = ruptura
-
-        # ====================================================
-        # 10. EVITAR PERSEGUIR UNA SUBIDA
-        # ====================================================
-
-        subida_previa = (
-            cambio_6 * 100
-        )
-
-        if (
-            subida_previa
-            > config.CRYPTO_MAX_SUBIDA_PREVIA_PCT
-        ):
-
-            score -= 20
+            score += 2
 
             motivos.append(
-                "movimiento ya demasiado extendido"
+                "momentum positivo débil"
             )
 
-        # ====================================================
-        # 11. VOLATILIDAD
-        # ====================================================
+        # ATR
+        if volatilidad_ok:
 
-        atr_pct = (
-            atr
-            / precio
-        )
-
-        if (
-            atr_pct
-            >= config.CRYPTO_ATR_MIN_PCT
-        ):
-
-            score += 6
+            score += 5
 
             motivos.append(
                 "volatilidad suficiente"
             )
 
-        else:
+        # ----------------------------------------------------
+        # LIMITAR SCORE
+        # ----------------------------------------------------
 
-            score -= 5
+        score = min(
+            score,
+            100,
+        )
+
+        # ----------------------------------------------------
+        # HARD FILTERS
+        # ----------------------------------------------------
+
+        filtros_duros = (
+            precio_sobre_tendencia
+            and emas_alineadas
+            and slope_positivo
+            and volumen_fuerte
+            and momentum_minimo
+            and rsi_en_zona
+            and volatilidad_ok
+            and subida_maxima
+        )
+
+        comprar = (
+            score
+            >= config.CRYPTO_SCORE_MINIMO
+            and filtros_duros
+        )
+
+        # ----------------------------------------------------
+        # MOTIVOS DE RECHAZO
+        # ----------------------------------------------------
+
+        if not precio_sobre_tendencia:
 
             motivos.append(
-                "volatilidad baja"
+                "debajo EMA tendencia"
             )
 
-        # ====================================================
+        if not emas_alineadas:
+
+            motivos.append(
+                "EMA no alineadas"
+            )
+
+        if not slope_positivo:
+
+            motivos.append(
+                "EMA sin aceleración"
+            )
+
+        if not volumen_fuerte:
+
+            motivos.append(
+                "volumen insuficiente"
+            )
+
+        if not momentum_minimo:
+
+            motivos.append(
+                "momentum insuficiente"
+            )
+
+        if not rsi_en_zona:
+
+            motivos.append(
+                "RSI fuera de zona"
+            )
+
+        if not volatilidad_ok:
+
+            motivos.append(
+                "ATR insuficiente"
+            )
+
+        if not subida_maxima:
+
+            motivos.append(
+                "movimiento demasiado extendido"
+            )
+
+        # ----------------------------------------------------
         # RESULTADO
-        # ====================================================
+        # ----------------------------------------------------
 
-        score = max(
-            0.0,
-            min(
-                100.0,
-                score,
+        resultado = {
+            "score": float(
+                score
             ),
+            "comprar": bool(
+                comprar
+            ),
+            "motivo": motivos,
+            "rsi": float(
+                rsi
+            ),
+            "volumen_ratio": float(
+                volumen_ratio
+            ),
+            "momentum_pct": float(
+                momentum_pct
+            ),
+            "atr_pct": float(
+                atr_pct
+            ),
+            "breakout": bool(
+                breakout
+            ),
+        }
+
+        log_message = (
+            f"{ticker}: "
+            f"score={score:.1f} "
+            f"comprar={comprar} "
+            f"RSI={rsi:.1f} "
+            f"vol={volumen_ratio:.2f}x "
+            f"momentum={momentum_pct:+.2f}% "
+            f"ATR={atr_pct:.2f}% "
+            f"breakout={breakout}"
         )
 
-        resultado["score"] = round(
-            score,
-            2,
-        )
-
-        resultado["motivo"] = motivos
-
-        # ====================================================
-        # CONDICIONES MÍNIMAS
-        # ====================================================
-
-        condiciones_minimas = (
-            tendencia
-            and emas_alcistas
-            and macd_alcista
-            and momentum_ok
-            and volumen_ratio
-            >= config.CRYPTO_VOLUMEN_MIN_MULTIPLICADOR
-            and (
-                config.CRYPTO_RSI_MIN
-                <= rsi
-                <= config.CRYPTO_RSI_MAX
-            )
-        )
-
-        resultado["comprar"] = (
-            condiciones_minimas
-            and score
-            >= config.CRYPTO_SCORE_MINIMO
+        # No usamos logging aquí para evitar
+        # duplicar configuración de logging.
+        print(
+            f"[crypto scanner] {log_message}"
         )
 
         return resultado
 
     except Exception as e:
 
-        resultado["motivo"] = [
-            f"error: {e}"
-        ]
+        print(
+            f"[crypto scanner] "
+            f"{ticker}: error analizando "
+            f"impulso: {e}"
+        )
 
         return resultado
 
 
 # ============================================================
-# GENERAR SEÑAL
+# FUNCIÓN PRINCIPAL DE SEÑAL
 # ============================================================
 
 def generar_senal(
     df,
     ticker,
 ):
+
     """
     Genera una señal utilizando el ticker real.
 
-    Crypto:
+    Criptomonedas:
         BTC/USD
         ETH/USD
         SOL/USD
 
-    El resto:
-        acciones
+    El resto se considera acción.
     """
 
     try:
 
-        if "/" in str(ticker):
+        if "/" in str(
+            ticker
+        ):
 
             return _generar_senal_cripto(
                 df
@@ -911,9 +1161,13 @@ def generar_senal(
 
     except Exception as e:
 
-        print(
+        log_message = (
             f"{ticker}: error generando "
             f"señal: {e}"
+        )
+
+        print(
+            log_message
         )
 
         return "ESPERAR"
