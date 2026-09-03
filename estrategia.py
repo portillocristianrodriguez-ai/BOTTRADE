@@ -1,4 +1,4 @@
-cat > ~/Desktop/bottrade-backtest/estrategia.py << 'PYEOF'
+
 import pandas as pd
 import ta
 import config
