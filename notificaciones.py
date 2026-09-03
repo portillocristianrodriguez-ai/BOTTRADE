@@ -1,162 +1,58 @@
-"""
-Notificaciones por Telegram.
-
-Si no hay token/chat_id configurados,
-no se envían notificaciones.
-"""
+"""Notificaciones por Telegram."""
 
 import logging
-
 import requests
-
 import config
-
 
 log = logging.getLogger(__name__)
 
 
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def notificar(
-    mensaje: str,
-):
-    """
-    Envía un mensaje a Telegram.
-
-    Devuelve:
-        True  -> enviado correctamente
-        False -> error o configuración incompleta
-    """
-
-    # ========================================================
-    # COMPROBAR CONFIGURACIÓN
-    # ========================================================
-
-    if (
-        not config.TELEGRAM_BOT_TOKEN
-        or not config.TELEGRAM_CHAT_ID
-    ):
-
-        log.warning(
-            "[Telegram] "
-            "TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID "
-            "no están configurados."
-        )
-
-        return False
-
-    # ========================================================
-    # COMPROBAR MENSAJE
-    # ========================================================
-
-    if not mensaje:
-
-        log.warning(
-            "[Telegram] "
-            "Se intentó enviar un mensaje vacío."
-        )
-
+def notificar(mensaje: str):
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        log.warning("[Telegram] Token o Chat ID no configurados.")
         return False
 
     try:
+        # Añadir identificación de la cuenta/bot
+        mensaje_final = (
+            f"🤖 {config.BOT_NOMBRE}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{mensaje}"
+        )
 
         url = (
-            "https://api.telegram.org/bot"
-            f"{config.TELEGRAM_BOT_TOKEN}"
-            "/sendMessage"
+            f"https://api.telegram.org/"
+            f"bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
         )
 
         respuesta = requests.post(
             url,
             json={
                 "chat_id": config.TELEGRAM_CHAT_ID,
-                "text": str(mensaje),
+                "text": mensaje_final,
             },
             timeout=10,
         )
 
-        # ====================================================
-        # RESPUESTA HTTP
-        # ====================================================
+        respuesta.raise_for_status()
 
-        if respuesta.status_code != 200:
+        datos = respuesta.json()
 
+        if not datos.get("ok"):
             log.error(
-                "[Telegram] "
-                f"Error HTTP {respuesta.status_code}: "
-                f"{respuesta.text}"
+                f"[Telegram] Error de API: {datos}"
             )
-
             return False
 
-        # ====================================================
-        # RESPUESTA JSON
-        # ====================================================
-
-        try:
-
-            datos = respuesta.json()
-
-        except Exception:
-
-            log.error(
-                "[Telegram] "
-                f"Respuesta no válida: "
-                f"{respuesta.text}"
-            )
-
-            return False
-
-        # ====================================================
-        # OK TELEGRAM
-        # ====================================================
-
-        if datos.get("ok") is True:
-
-            log.info(
-                "[Telegram] "
-                "Notificación enviada correctamente."
-            )
-
-            return True
-
-        # ====================================================
-        # ERROR TELEGRAM
-        # ====================================================
-
-        log.error(
-            "[Telegram] "
-            f"Telegram rechazó el mensaje: "
-            f"{datos}"
+        log.info(
+            f"[Telegram] Notificación enviada correctamente "
+            f"({config.BOT_NOMBRE})."
         )
 
-        return False
-
-    except requests.exceptions.Timeout:
-
-        log.error(
-            "[Telegram] "
-            "Timeout esperando respuesta de Telegram."
-        )
-
-        return False
-
-    except requests.exceptions.RequestException as e:
-
-        log.error(
-            "[Telegram] "
-            f"Error de conexión: {e}"
-        )
-
-        return False
+        return True
 
     except Exception as e:
-
-        log.error(
-            "[Telegram] "
-            f"Error inesperado: {e}"
+        log.warning(
+            f"[Telegram] No se pudo enviar notificación: {e}"
         )
-
         return False
