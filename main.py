@@ -3,10 +3,9 @@ Punto de entrada del bot.
 
 Gestiona:
 - Acciones: velas diarias + bracket orders.
-- Posiciones de acciones existentes: comprueba y crea protección
-  automáticamente si falta SL/TP.
-- Cripto: gestión manual de stop-loss + trailing stop.
-- Órdenes ejecutadas: monitorización y avisos por Telegram.
+- Posiciones de acciones existentes: protección automática.
+- Cripto: stop-loss + trailing stop manual.
+- Órdenes ejecutadas: avisos por Telegram.
 """
 
 import time
@@ -39,11 +38,12 @@ _maximos_cripto = {}
 # =========================================================
 
 def revisar_ticker(ticker: str):
-    """Revisa un ticker y gestiona su posición."""
 
     try:
 
-        df = broker.obtener_datos(ticker)
+        df = broker.obtener_datos(
+            ticker
+        )
 
         if df.empty:
 
@@ -53,9 +53,13 @@ def revisar_ticker(ticker: str):
 
             return
 
-        df = estrategia.calcular_indicadores(df)
+        df = estrategia.calcular_indicadores(
+            df
+        )
 
-        senal = estrategia.generar_senal(df)
+        senal = estrategia.generar_senal(
+            df
+        )
 
         actual = df.iloc[-1]
 
@@ -65,7 +69,10 @@ def revisar_ticker(ticker: str):
 
         atr_actual = (
             float(actual["atr"])
-            if not actual.isna().get("atr", True)
+            if not actual.isna().get(
+                "atr",
+                True
+            )
             else None
         )
 
@@ -79,11 +86,12 @@ def revisar_ticker(ticker: str):
             f"{ticker}: "
             f"precio=${precio_actual:.2f} "
             f"señal={senal} "
-            f"posición_abierta={posicion_abierta}"
+            f"posición_abierta="
+            f"{posicion_abierta}"
         )
 
         # =====================================================
-        # ACCIONES: PROTEGER POSICIONES EXISTENTES
+        # PROTEGER ACCIONES EXISTENTES
         # =====================================================
 
         if (
@@ -167,7 +175,7 @@ def revisar_ticker(ticker: str):
                 return
 
             # -------------------------------------------------
-            # TRAILING STOP MANUAL
+            # TRAILING STOP
             # -------------------------------------------------
 
             info_posicion = (
@@ -307,7 +315,7 @@ def revisar_ticker(ticker: str):
 
             _maximos_cripto.pop(
                 ticker,
-                None,
+                None
             )
 
             if mensaje:
@@ -386,7 +394,7 @@ def loop_acciones():
 
 
 # =========================================================
-# MONITOR DE EJECUCIONES
+# LOOP MONITOR DE EJECUCIONES
 # =========================================================
 
 def loop_ejecuciones():
@@ -394,6 +402,10 @@ def loop_ejecuciones():
     log.info(
         "[ejecuciones] Monitor de órdenes iniciado."
     )
+
+    # Ignorar operaciones que ya existían
+    # antes de arrancar el bot.
+    broker.inicializar_monitor_ejecuciones()
 
     while True:
 
@@ -413,8 +425,7 @@ def loop_ejecuciones():
 
                     log.info(
                         "[ejecuciones] "
-                        "Notificación enviada: "
-                        f"{mensaje}"
+                        "Notificación enviada."
                     )
 
                 except Exception as e:
@@ -433,7 +444,7 @@ def loop_ejecuciones():
                 f"órdenes: {e}"
             )
 
-        # Comprobar cada 30 segundos
+        # Revisar cada 30 segundos
         time.sleep(30)
 
 
@@ -531,7 +542,7 @@ def main():
         )
 
     # =====================================================
-    # CREAR HILOS
+    # HILOS
     # =====================================================
 
     hilos = []
@@ -564,10 +575,6 @@ def main():
             )
         )
 
-    # =====================================================
-    # COMPROBAR QUE HAY ALGO QUE EJECUTAR
-    # =====================================================
-
     if not hilos:
 
         log.error(
@@ -591,10 +598,7 @@ def main():
         "han sido iniciados correctamente."
     )
 
-    # =====================================================
-    # MANTENER VIVO EL PROCESO PRINCIPAL
-    # =====================================================
-
+    # Mantener vivo el proceso principal
     while True:
 
         time.sleep(60)
