@@ -42,6 +42,7 @@ from alpaca.data.timeframe import (
     TimeFrame,
     TimeFrameUnit,
 )
+from alpaca.data.enums import Datafeed
 
 import config
 
@@ -180,6 +181,7 @@ def obtener_datos(ticker: str) -> pd.DataFrame:
                 start=inicio,
                 end=ahora,
                 limit=300,
+                feed=DataFeed=300
             )
 
             resultado = cliente_datos_acciones.get_stock_bars(
