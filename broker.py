@@ -169,25 +169,28 @@ def es_cripto(ticker: str) -> bool:
         ticker
     ).upper().strip()
 
-    if "/" in ticker:
+    if not ticker:
+        return False
 
+    # Formato normal de Alpaca:
+    # BTC/USD, ETH/USD, BAT/USD, etc.
+    if "/" in ticker:
         return True
 
-    criptos = (
-        "BTCUSD",
-        "ETHUSD",
-        "SOLUSD",
-        "AVAXUSD",
-        "LINKUSD",
-        "DOGEUSD",
-        "LTCUSD",
-        "BCHUSD",
-        "UNIUSD",
-        "AAVEUSD",
-        "HYPEUSD",
-    )
+    # Algunos endpoints de Alpaca pueden devolver
+    # posiciones/órdenes crypto sin la barra:
+    # BTCUSD, ETHUSD, BATUSD, etc.
+    #
+    # Cualquier símbolo terminado en USD con
+    # una base no vacía se considera crypto.
+    if ticker.endswith("USD"):
 
-    return ticker in criptos
+        base = ticker[:-3]
+
+        if base:
+            return True
+
+    return False
 
 
 # ============================================================
@@ -203,6 +206,16 @@ def normalizar_ticker_crypto(
     ).upper().strip()
 
     if "/" in ticker:
+
+        partes = ticker.split("/")
+
+        if (
+            len(partes) == 2
+            and partes[1] == "USD"
+            and partes[0]
+        ):
+
+            return f"{partes[0]}/USD"
 
         return ticker
 
@@ -232,7 +245,9 @@ def ticker_comparacion(
     if es_cripto(ticker):
 
         return (
-            ticker
+            normalizar_ticker_crypto(
+                ticker
+            )
             .replace("/", "")
             .replace("-", "")
             .replace(" ", "")
@@ -3006,4 +3021,4 @@ def detectar_ejecuciones():
             f"detectando ejecuciones: {e}"
         )
 
-    return nuevas
+    return nuevas               
