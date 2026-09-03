@@ -1,4 +1,3 @@
-cat > ~/Desktop/bottrade-backtest/estrategia.py << 'PYEOF'
 import pandas as pd
 import ta
 import config
@@ -68,6 +67,3 @@ def generar_senal(df: pd.DataFrame) -> str:
         return "COMPRAR"
 
     return "ESPERAR"
-PYEOF
-echo "estrategia.py creado correctamente"
-python3 diagnostico_senales.py
