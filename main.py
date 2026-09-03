@@ -14,6 +14,7 @@ Gestiona:
 - Trailing stop de cripto
 - Recuperación tras reinicios
 - Bloqueo contra operaciones duplicadas
+- Comandos de Telegram
 """
 
 import time
@@ -238,7 +239,6 @@ def proteger_compra_ejecutada(
 
                 break
 
-            # Puede significar que ya existe.
             analisis = (
                 broker.analizar_proteccion(
                     ticker
@@ -478,8 +478,6 @@ def revisar_ticker(
 
                 with _lock_operaciones:
 
-                    # Volver a comprobar posición
-                    # antes de vender.
                     if not broker.tiene_posicion_abierta(
                         ticker
                     ):
@@ -753,6 +751,216 @@ def revisar_ticker(
             f"{ticker}: error general en "
             f"revisar_ticker: {e}"
         )
+
+
+# ============================================================
+# COMANDOS TELEGRAM
+# ============================================================
+
+def procesar_comando_telegram(
+    comando: str,
+):
+
+    comando = str(
+        comando
+    ).strip().lower()
+
+    # ========================================================
+    # SALDO
+    # ========================================================
+
+    if comando == "/saldo":
+
+        datos = (
+            broker.obtener_resumen_cuenta()
+        )
+
+        if not datos:
+
+            return (
+                "❌ No se pudo obtener "
+                "el saldo de la cuenta."
+            )
+
+        beneficio = datos[
+            "beneficio_dia"
+        ]
+
+        beneficio_posiciones = datos[
+            "beneficio_posiciones"
+        ]
+
+        emoji_dia = (
+            "🟢"
+            if beneficio >= 0
+            else "🔴"
+        )
+
+        emoji_posiciones = (
+            "🟢"
+            if beneficio_posiciones >= 0
+            else "🔴"
+        )
+
+        return (
+            "💰 SALDO DE LA CUENTA\n\n"
+
+            f"Capital total: "
+            f"${datos['equity']:,.2f}\n"
+
+            f"Disponible: "
+            f"${datos['cash']:,.2f}\n"
+
+            f"Buying Power: "
+            f"${datos['buying_power']:,.2f}\n\n"
+
+            "📊 RESULTADO DEL DÍA\n"
+
+            f"{emoji_dia} "
+            f"${beneficio:+,.2f}\n\n"
+
+            "📈 POSICIONES ABIERTAS\n"
+
+            f"{datos['numero_posiciones']}\n\n"
+
+            "📊 P/L NO REALIZADO\n"
+
+            f"{emoji_posiciones} "
+            f"${beneficio_posiciones:+,.2f}"
+        )
+
+    # ========================================================
+    # POSICIONES
+    # ========================================================
+
+    if comando == "/posiciones":
+
+        posiciones = (
+            broker.obtener_posiciones_telegram()
+        )
+
+        if not posiciones:
+
+            return (
+                "📭 No hay posiciones abiertas."
+            )
+
+        mensaje = (
+            "📊 POSICIONES ABIERTAS\n\n"
+        )
+
+        for posicion in posiciones:
+
+            beneficio = posicion[
+                "beneficio"
+            ]
+
+            emoji = (
+                "🟢"
+                if beneficio >= 0
+                else "🔴"
+            )
+
+            mensaje += (
+                f"{emoji} "
+                f"{posicion['simbolo']}\n"
+
+                f"Cantidad: "
+                f"{posicion['cantidad']}\n"
+
+                f"Entrada: "
+                f"${posicion['entrada']:.2f}\n"
+
+                f"Actual: "
+                f"${posicion['actual']:.2f}\n"
+
+                f"P/L: "
+                f"${beneficio:+,.2f} "
+                f"({posicion['beneficio_pct']:+.2f}%)\n\n"
+            )
+
+        return mensaje
+
+    # ========================================================
+    # ESTADO
+    # ========================================================
+
+    if comando == "/estado":
+
+        datos = (
+            broker.obtener_resumen_cuenta()
+        )
+
+        if not datos:
+
+            return (
+                "❌ No se pudo obtener "
+                "el estado del bot."
+            )
+
+        beneficio = datos[
+            "beneficio_dia"
+        ]
+
+        emoji = (
+            "🟢"
+            if beneficio >= 0
+            else "🔴"
+        )
+
+        return (
+            "📊 ESTADO DEL BOT\n\n"
+
+            f"🤖 {config.BOT_NOMBRE}\n\n"
+
+            f"Modo: "
+            f"{'PAPER' if config.PAPER else 'REAL'}\n"
+
+            f"{emoji} Resultado del día: "
+            f"${beneficio:+,.2f}\n"
+
+            f"💰 Equity: "
+            f"${datos['equity']:,.2f}\n"
+
+            f"📈 Posiciones: "
+            f"{datos['numero_posiciones']}\n"
+
+            f"🛡️ Protección de acciones: "
+            f"ACTIVA"
+        )
+
+    # ========================================================
+    # START / HELP
+    # ========================================================
+
+    if comando in (
+        "/start",
+        "/help",
+    ):
+
+        return (
+            "🤖 COMANDOS DISPONIBLES\n\n"
+
+            "/saldo\n"
+            "💰 Saldo, resultado del día "
+            "y P/L abierto.\n\n"
+
+            "/posiciones\n"
+            "📈 Posiciones abiertas "
+            "y beneficio/pérdida.\n\n"
+
+            "/estado\n"
+            "📊 Estado general del bot."
+        )
+
+    # ========================================================
+    # DESCONOCIDO
+    # ========================================================
+
+    return (
+        "❓ Comando no reconocido.\n\n"
+        "Usa /help para ver los comandos."
+    )
 
 
 # ============================================================
@@ -1098,7 +1306,7 @@ def main():
     )
 
     # ========================================================
-    # TELEGRAM
+    # TELEGRAM — INICIO
     # ========================================================
 
     try:
@@ -1117,6 +1325,27 @@ def main():
         log.warning(
             f"No se pudo enviar "
             f"notificación de inicio: {e}"
+        )
+
+    # ========================================================
+    # COMANDOS TELEGRAM
+    # ========================================================
+
+    try:
+
+        notificaciones.iniciar_comandos(
+            procesar_comando_telegram
+        )
+
+        log.info(
+            "[Telegram] Monitor de comandos iniciado."
+        )
+
+    except Exception as e:
+
+        log.warning(
+            f"No se pudo iniciar "
+            f"el monitor de comandos Telegram: {e}"
         )
 
     # ========================================================
