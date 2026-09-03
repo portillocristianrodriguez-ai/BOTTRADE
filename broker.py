@@ -1,4 +1,7 @@
-"""Todo lo que toca la API de Alpaca: datos, posiciones y órdenes."""
+"""
+Todo lo que toca la API de Alpaca:
+datos, posiciones y órdenes.
+"""
 
 import logging
 from datetime import datetime, timedelta
@@ -193,8 +196,6 @@ def precio_actual_posicion(ticker: str):
 
 def obtener_ordenes_abiertas(ticker: str):
 
-    """Devuelve las órdenes abiertas de un ticker."""
-
     try:
 
         filtro = GetOrdersRequest(
@@ -226,16 +227,6 @@ def tiene_proteccion(
     ticker: str,
 ) -> tuple[bool, bool]:
 
-    """
-    Comprueba si una posición tiene:
-    - Stop Loss
-    - Take Profit
-
-    Devuelve:
-
-        (tiene_stop_loss, tiene_take_profit)
-    """
-
     stop = False
     take_profit = False
 
@@ -247,7 +238,6 @@ def tiene_proteccion(
 
         try:
 
-            # Orden OCO
             if str(
                 orden.order_class
             ).lower().endswith("oco"):
@@ -258,7 +248,6 @@ def tiene_proteccion(
                 if orden.stop_loss is not None:
                     stop = True
 
-            # Órdenes hijas
             orden_tipo = str(
                 getattr(
                     orden,
@@ -471,16 +460,6 @@ def proteger_posicion(
     atr: float,
 ) -> str | None:
 
-    """
-    Protege una posición de acciones existente
-    con una orden OCO:
-
-    - Stop Loss
-    - Take Profit
-
-    Solo se utiliza para acciones.
-    """
-
     if es_cripto(ticker):
         return None
 
@@ -526,10 +505,6 @@ def proteger_posicion(
 
         return None
 
-    # -----------------------------------------------------
-    # CANCELAR PROTECCIONES/ÓRDENES DE VENTA ANTIGUAS
-    # -----------------------------------------------------
-
     ordenes = obtener_ordenes_abiertas(
         ticker
     )
@@ -552,10 +527,6 @@ def proteger_posicion(
                 f"{ticker}: no se pudo cancelar "
                 f"orden {orden.id}: {e}"
             )
-
-    # -----------------------------------------------------
-    # CALCULAR SL / TP
-    # -----------------------------------------------------
 
     stop_loss = round(
         precio_entrada
@@ -591,10 +562,6 @@ def proteger_posicion(
         )
 
         return None
-
-    # -----------------------------------------------------
-    # CREAR OCO
-    # -----------------------------------------------------
 
     try:
 
@@ -709,13 +676,13 @@ def vender(
 # =========================================================
 
 _ordenes_notificadas = set()
+_monitor_ejecuciones_inicializado = False
 
 
 def obtener_ordenes_ejecutadas():
 
     """
     Devuelve las órdenes ejecutadas recientemente.
-
     Solo devuelve órdenes FILLED.
     """
 
@@ -748,16 +715,51 @@ def obtener_ordenes_ejecutadas():
         return []
 
 
+def inicializar_monitor_ejecuciones():
+
+    """
+    Marca como ya notificadas las órdenes FILLED
+    que ya existían cuando arrancó el bot.
+
+    Así un reinicio de Railway no genera
+    notificaciones antiguas.
+    """
+
+    global _monitor_ejecuciones_inicializado
+
+    if _monitor_ejecuciones_inicializado:
+        return
+
+    ordenes = obtener_ordenes_ejecutadas()
+
+    for orden in ordenes:
+
+        try:
+
+            _ordenes_notificadas.add(
+                str(orden.id)
+            )
+
+        except Exception:
+
+            continue
+
+    _monitor_ejecuciones_inicializado = True
+
+    log.info(
+        f"[ejecuciones] Monitor inicializado. "
+        f"{len(_ordenes_notificadas)} "
+        f"órdenes antiguas ignoradas."
+    )
+
+
 def detectar_ejecuciones():
 
     """
     Detecta nuevas órdenes FILLED.
 
-    Devuelve mensajes para Telegram.
-
-    Evita notificar dos veces
-    la misma orden durante la ejecución
-    del bot.
+    Solo devuelve ejecuciones que no hayan
+    sido notificadas anteriormente.
     """
 
     mensajes = []
@@ -809,10 +811,6 @@ def detectar_ejecuciones():
                 None,
             )
 
-            # -------------------------------------------------
-            # CANTIDAD
-            # -------------------------------------------------
-
             if cantidad is not None:
 
                 try:
@@ -834,10 +832,6 @@ def detectar_ejecuciones():
             else:
 
                 cantidad_txt = "?"
-
-            # -------------------------------------------------
-            # PRECIO
-            # -------------------------------------------------
 
             if precio is not None:
 
@@ -862,10 +856,6 @@ def detectar_ejecuciones():
                 precio_txt = (
                     "precio desconocido"
                 )
-
-            # -------------------------------------------------
-            # MENSAJE
-            # -------------------------------------------------
 
             mensaje = (
                 f"{emoji} {accion} EJECUTADA\n"
@@ -892,10 +882,6 @@ def detectar_ejecuciones():
                 "No se pudo procesar "
                 f"una orden ejecutada: {e}"
             )
-
-    # -----------------------------------------------------
-    # EVITAR CRECIMIENTO INFINITO
-    # -----------------------------------------------------
 
     if len(
         _ordenes_notificadas
