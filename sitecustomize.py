@@ -105,7 +105,6 @@ def _install_broker(broker_module):
             ajustada = float(qty) * factor
 
             if broker_module.es_cripto(ticker):
-                # Liquidity adjustment is applied before the final risk check.
                 propuesta = ajustada * precio
                 recomendada, razon = _execution_quality_notional(broker_module, ticker, propuesta)
                 if recomendada <= 0:
@@ -141,8 +140,9 @@ def _install_broker(broker_module):
             from alpaca.trading.enums import QueryOrderStatus
             from alpaca.trading.requests import GetOrdersRequest
 
-            equity = float(getattr(client.get_account(), "equity", 0) or 0)
-            buying_power = float(getattr(client.get_account(), "buying_power", 0) or 0)
+            account = client.get_account()
+            equity = float(getattr(account, "equity", 0) or 0)
+            buying_power = float(getattr(account, "buying_power", 0) or 0)
             proposed = float(qty) * float(price)
             if equity <= 0 or buying_power <= 0 or proposed <= 0 or not math.isfinite(proposed):
                 return False
@@ -157,9 +157,6 @@ def _install_broker(broker_module):
                 if cap > 0 and proposed > cap + 0.01:
                     broker_module.log.critical(f"[GUARDIA] {ticker}: supera cap interno crypto")
                     return False
-                # The quality module may reduce the size in dynamic_size. The
-                # final check only hard-blocks a genuinely bad market, rather
-                # than rejecting a valid reduced order.
                 if bool(getattr(config, "CRYPTO_EXECUTION_QUALITY_ENABLED", True)):
                     recommended, reason = _execution_quality_notional(broker_module, ticker, proposed)
                     if recommended <= 0:
@@ -233,7 +230,9 @@ def _obtener_regimen_global(broker_module):
     try:
         import market_regime
         datos = broker_module.obtener_datos_crypto_lote(["BTC/USD"], dias=3)
-        btc = datos.get("BTC/USD") or datos.get("BTCUSD")
+        btc = datos.get("BTC/USD")
+        if btc is None:
+            btc = datos.get("BTCUSD")
         regime = market_regime.evaluar_regimen_btc(btc)
         _REGIME_CACHE["ts"] = now
         _REGIME_CACHE["data"] = regime
@@ -307,8 +306,7 @@ def _install_strategy(strategy_module):
             result["market_regime"] = regime_name
             result["market_regime_score"] = regime_score
             result["market_regime_adjustment"] = regime_adjustment
-            hard_block_bear = regime_name == "bajista" and raw < 84.0
-            if hard_block_bear:
+            if regime_name == "bajista" and raw < 84.0:
                 result["comprar"] = False
                 result.setdefault("motivo", []).append("BTC en régimen bajista")
             result["score"] = portfolio_score
