@@ -103,7 +103,9 @@ def _partial_sell(broker, ticker, fraction):
 def _obtener_contexto(broker, ticker, position):
     try:
         datos = broker.obtener_datos_crypto_lote([ticker], dias=3)
-        df = datos.get(ticker) or datos.get(str(ticker).replace("/", ""))
+        df = datos.get(ticker)
+        if df is None:
+            df = datos.get(str(ticker).replace("/", ""))
         if df is None or getattr(df, "empty", True):
             return None
         indicadores = estrategia.calcular_indicadores(df)
@@ -114,10 +116,7 @@ def _obtener_contexto(broker, ticker, position):
         if precio <= 0 or atr <= 0 or not 0 <= rsi <= 100:
             return None
         analysis = estrategia.analizar_impulso_crypto(df, ticker)
-        book = obtener_contexto_orderbook(
-            getattr(broker, "cliente_datos_crypto", None),
-            broker.normalizar_ticker_crypto(ticker),
-        )
+        book = obtener_contexto_orderbook(getattr(broker, "cliente_datos_crypto", None), broker.normalizar_ticker_crypto(ticker))
         if book.get("available"):
             registrar_microestructura(ticker, book.get("book_imbalance"), book.get("spread_pct"))
         return {
@@ -224,13 +223,7 @@ def _gestionar_previamente(main_module):
 
         micro = {"confirmed": False, "score": 0.0, "samples": 0, "reason": "no_history"}
         if ctx["orderbook_available"]:
-            micro = evaluar_microestructura(
-                ticker,
-                min_samples=min_samples,
-                window_seconds=window,
-                imbalance_threshold=imbalance_threshold,
-                spread_threshold=spread_threshold,
-            )
+            micro = evaluar_microestructura(ticker, min_samples=min_samples, window_seconds=window, imbalance_threshold=imbalance_threshold, spread_threshold=spread_threshold)
 
         if micro["confirmed"]:
             if micro["score"] >= exit_threshold and decision.get("action") in {"tighten", "reduce", "exit"}:
