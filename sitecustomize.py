@@ -1,8 +1,7 @@
-"""Compatibility hardening layer for BOTTRADE.
+"""Capa de compatibilidad y endurecimiento de ejecución de BOTTRADE.
 
-Applies scoped safeguards to the existing broker/strategy modules until the
-same controls are moved directly into broker.py. It never enables live trading
-or sends orders to the secondary account.
+Se mantiene temporalmente fuera de broker.py para evitar una refactorización
+arriesgada del broker legacy. No activa trading live ni envía órdenes.
 """
 from __future__ import annotations
 
@@ -19,14 +18,14 @@ _REGIME_CACHE = {"ts": 0.0, "data": None}
 
 
 def _execution_quality_notional(broker_module, ticker, proposed):
-    """Return a smaller crypto notional when the book is thin; never enlarge it."""
     try:
         import config
         import execution_quality
+        proposed = max(0.0, float(proposed))
+        if proposed <= 0 or not broker_module.es_cripto(ticker):
+            return proposed, "not_applicable"
         if not bool(getattr(config, "CRYPTO_EXECUTION_QUALITY_ENABLED", True)):
             return proposed, "disabled"
-        if not broker_module.es_cripto(ticker) or proposed <= 0:
-            return proposed, "not_applicable"
         quality = execution_quality.evaluate_crypto_orderbook(
             getattr(broker_module, "cliente_datos_crypto", None),
             broker_module.normalizar_ticker_crypto(ticker),
@@ -44,34 +43,31 @@ def _execution_quality_notional(broker_module, ticker, proposed):
         if not quality.get("ok", True):
             return 0.0, str(quality.get("reason", "blocked"))
         recommended = float(quality.get("recommended_notional", proposed) or proposed)
-        return max(0.0, min(proposed, recommended)), str(quality.get("reason", "ok"))
+        return min(proposed, max(0.0, recommended)), str(quality.get("reason", "ok"))
     except Exception as exc:
         broker_module.log.warning(f"[EXEC] {ticker}: control de calidad no disponible: {exc}")
         return proposed, "unavailable"
 
 
 def _normalizar_qty_crypto(broker_module, ticker, qty):
-    """Respecta min_order_size y min_trade_increment publicados por Alpaca."""
     try:
         symbol = broker_module.normalizar_ticker_crypto(ticker)
         asset = broker_module.cliente_trading.get_asset(symbol)
-        raw_qty = Decimal(str(qty))
+        raw = Decimal(str(qty))
         minimum = Decimal(str(getattr(asset, "min_order_size", "0") or "0"))
         increment = Decimal(str(getattr(asset, "min_trade_increment", "0") or "0"))
-        if raw_qty <= 0:
-            return 0.0
-        if minimum > 0 and raw_qty < minimum:
+        if raw <= 0 or (minimum > 0 and raw < minimum):
             return 0.0
         if increment > 0:
-            steps = ((raw_qty - minimum) / increment).to_integral_value(rounding=ROUND_DOWN)
-            raw_qty = minimum + max(Decimal("0"), steps) * increment
-        if minimum > 0 and raw_qty < minimum:
-            return 0.0
-        return float(raw_qty)
+            steps = (raw / increment).to_integral_value(rounding=ROUND_DOWN)
+            raw = steps * increment
+            if minimum > 0 and raw < minimum:
+                return 0.0
+        return float(raw)
     except (InvalidOperation, ValueError, TypeError):
         return float(qty)
     except Exception as exc:
-        broker_module.log.warning(f"[SIZING] {ticker}: no se pudo normalizar incremento crypto: {exc}")
+        broker_module.log.warning(f"[SIZING] {ticker}: no se pudo normalizar cantidad crypto: {exc}")
         return float(qty)
 
 
@@ -87,7 +83,6 @@ def _install_broker(broker_module):
         return
 
     def dynamic_size(ticker, precio, atr):
-        """Ajusta tamaño por volatilidad, liquidez y reglas del activo."""
         qty = size_original(ticker, precio, atr)
         try:
             import config
@@ -95,42 +90,37 @@ def _install_broker(broker_module):
             atr = float(atr)
             if qty <= 0 or precio <= 0 or atr <= 0:
                 return qty
-
             atr_pct = atr / precio
-            objetivo = float(getattr(
+            target = float(getattr(
                 config,
                 "CRYPTO_TARGET_ATR_PCT" if broker_module.es_cripto(ticker) else "STOCK_TARGET_ATR_PCT",
                 0.020 if broker_module.es_cripto(ticker) else 0.015,
             ))
-            minimo = min(1.0, max(0.10, float(getattr(config, "DYNAMIC_RISK_MIN_MULTIPLIER", 0.60))))
-            maximo = max(1.0, min(1.50, float(getattr(config, "DYNAMIC_RISK_MAX_MULTIPLIER", 1.15))))
-            objetivo = max(0.0001, objetivo)
-            factor = min(maximo, max(minimo, objetivo / atr_pct))
-            ajustada = float(qty) * factor
-
+            minimum_factor = min(1.0, max(0.10, float(getattr(config, "DYNAMIC_RISK_MIN_MULTIPLIER", 0.60))))
+            maximum_factor = max(1.0, min(1.50, float(getattr(config, "DYNAMIC_RISK_MAX_MULTIPLIER", 1.15))))
+            target = max(0.0001, target)
+            factor = min(maximum_factor, max(minimum_factor, target / atr_pct))
+            adjusted = float(qty) * factor
+            reason_txt = ""
             if broker_module.es_cripto(ticker):
-                propuesta = ajustada * precio
-                recomendada, razon = _execution_quality_notional(broker_module, ticker, propuesta)
-                if recomendada <= 0:
+                proposed = adjusted * precio
+                recommended, reason = _execution_quality_notional(broker_module, ticker, proposed)
+                if recommended <= 0:
                     return 0
-                if recomendada < propuesta:
-                    ajustada = recomendada / precio
-                    razon_txt = f" liquidez={razon}"
-                else:
-                    razon_txt = ""
-                ajustada = _normalizar_qty_crypto(broker_module, ticker, round(ajustada, 9))
+                if recommended < proposed:
+                    adjusted = recommended / precio
+                    reason_txt = f" liquidez={reason}"
+                adjusted = _normalizar_qty_crypto(broker_module, ticker, adjusted)
             else:
-                ajustada = max(1, int(ajustada))
-                razon_txt = ""
-
-            if ajustada <= 0:
+                adjusted = max(1, int(adjusted))
+            if adjusted <= 0:
                 return 0
-            if abs(factor - 1.0) >= 0.02 or razon_txt:
+            if abs(factor - 1.0) >= 0.02 or reason_txt:
                 broker_module.log.info(
-                    f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} "
-                    f"factor={factor:.3f} qty={qty}->{ajustada}{razon_txt}"
+                    f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={target:.4%} "
+                    f"factor={factor:.3f} qty={qty}->{adjusted}{reason_txt}"
                 )
-            return ajustada
+            return adjusted
         except Exception as exc:
             broker_module.log.warning(f"[SIZING] {ticker}: sizing dinámico omitido: {exc}")
             return qty
@@ -143,19 +133,16 @@ def _install_broker(broker_module):
             import execution_guard
             from alpaca.trading.enums import QueryOrderStatus
             from alpaca.trading.requests import GetOrdersRequest
-
             account = client.get_account()
             equity = float(getattr(account, "equity", 0) or 0)
             buying_power = float(getattr(account, "buying_power", 0) or 0)
             proposed = float(qty) * float(price)
             if equity <= 0 or buying_power <= 0 or proposed <= 0 or not math.isfinite(proposed):
                 return False
-
             bp_pct = min(0.99, max(0.10, float(getattr(config, "MAX_BUYING_POWER_USAGE_PCT", 0.90))))
             if proposed > buying_power * bp_pct + 0.01:
-                broker_module.log.critical(f"[GUARDIA] {ticker}: buying power insuficiente para nueva orden")
+                broker_module.log.critical(f"[GUARDIA] {ticker}: buying power insuficiente")
                 return False
-
             if broker_module.es_cripto(ticker):
                 cap = float(getattr(config, "CRYPTO_INTERNAL_MAX_ORDER_NOTIONAL_USD", 100000.0))
                 if cap > 0 and proposed > cap + 0.01:
@@ -168,18 +155,17 @@ def _install_broker(broker_module):
                         return False
                     if recommended < proposed * 0.98:
                         broker_module.log.warning(
-                            f"[EXEC] {ticker}: sizing no coincide con profundidad; "
+                            f"[EXEC] {ticker}: orden superior a profundidad segura; "
                             f"propuesto=${proposed:.2f}, recomendado=${recommended:.2f}"
                         )
                         return False
-
             positions = client.get_all_positions()
             open_orders = client.get_orders(
                 filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True)
             )
             if broker_module.tiene_posicion_abierta(ticker) or broker_module.obtener_ordenes_ticker(ticker):
+                broker_module.log.info(f"[GUARDIA] {ticker}: ya existe posición u orden abierta")
                 return False
-
             ok, reason = execution_guard.validar_exposicion_compra(
                 equity=equity,
                 proposed_notional=proposed,
@@ -242,13 +228,8 @@ def _obtener_regimen_global(broker_module):
         regime = market_regime.evaluar_regimen_btc(btc)
         _REGIME_CACHE["ts"] = now
         _REGIME_CACHE["data"] = regime
-        broker_module.log.info(
-            f"[REGIMEN] BTC={regime.get('regimen')} score={regime.get('score', 50):.1f} "
-            f"confidence={regime.get('confidence', 0):.2f}"
-        )
         return regime
-    except Exception as exc:
-        broker_module.log.warning(f"[REGIMEN] no disponible; se usa neutral: {exc}")
+    except Exception:
         return {"regimen": "neutral", "score": 50.0, "confidence": 0.0}
 
 
@@ -259,6 +240,20 @@ def _install_strategy(strategy_module):
     original = getattr(strategy_module, "analizar_impulso_crypto", None)
     if not callable(original):
         return
+    if not callable(getattr(strategy_module, "generar_senal", None)):
+        acciones = getattr(strategy_module, "_generar_senal_acciones", None)
+        if callable(acciones):
+            strategy_module.generar_senal = acciones
+
+    original_mtf = getattr(strategy_module, "_confirmacion_multitimeframe", None)
+    if callable(original_mtf):
+        def compat_mtf(*args, **kwargs):
+            result = original_mtf(*args, **kwargs)
+            if isinstance(result, dict):
+                result = dict(result)
+                result.setdefault("mtf_alineacion", result.get("alineacion", "neutral"))
+            return result
+        strategy_module._confirmacion_multitimeframe = compat_mtf
 
     def portfolio_crypto(df, ticker):
         result = original(df, ticker)
@@ -284,34 +279,22 @@ def _install_strategy(strategy_module):
                 if item["ticker"] == current_ticker:
                     continue
                 corr = abs(_corr(df, item["df"]))
-                weight = _clamp(item["score"] / 100.0, 0.0, 1.0)
-                correlation_penalty += 10.0 * corr * weight
+                correlation_penalty += 10.0 * corr * _clamp(item["score"] / 100.0, 0.0, 1.0)
             correlation_penalty = _clamp(correlation_penalty, 0.0, 20.0)
             broker_module = __import__("broker")
             regime = _obtener_regimen_global(broker_module)
             regime_name = str(regime.get("regimen", "neutral"))
             regime_score = float(regime.get("score", 50.0) or 50.0)
-            regime_adjustment = {
-                "alcista": 6.0,
-                "transicion_alcista": 2.0,
-                "neutral": 0.0,
-                "transicion_bajista": -6.0,
-                "bajista": -14.0,
-            }.get(regime_name, 0.0)
-            portfolio_score = _clamp(
-                raw + quality_bonus - volatility_penalty - correlation_penalty + regime_adjustment,
-                0.0,
-                100.0,
-            )
+            adjustment = {"alcista": 6.0, "transicion_alcista": 2.0, "neutral": 0.0,
+                          "transicion_bajista": -6.0, "bajista": -14.0}.get(regime_name, 0.0)
+            portfolio_score = _clamp(raw + quality_bonus - volatility_penalty - correlation_penalty + adjustment, 0.0, 100.0)
             result = dict(result)
-            result["raw_score"] = raw
-            result["quality_bonus"] = quality_bonus
-            result["volatility_penalty"] = volatility_penalty
-            result["portfolio_score"] = portfolio_score
-            result["correlation_penalty"] = correlation_penalty
-            result["market_regime"] = regime_name
-            result["market_regime_score"] = regime_score
-            result["market_regime_adjustment"] = regime_adjustment
+            result.update({
+                "raw_score": raw, "quality_bonus": quality_bonus,
+                "volatility_penalty": volatility_penalty, "portfolio_score": portfolio_score,
+                "correlation_penalty": correlation_penalty, "market_regime": regime_name,
+                "market_regime_score": regime_score, "market_regime_adjustment": adjustment,
+            })
             if regime_name == "bajista" and raw < 84.0:
                 result["comprar"] = False
                 result.setdefault("motivo", []).append("BTC en régimen bajista")
@@ -327,14 +310,15 @@ def _install_strategy(strategy_module):
     _INSTALLED_STRATEGY = True
 
 
-def _import(name, globals=None, locals=None, fromlist=(), level=0):
+def _import_hook(name, globals=None, locals=None, fromlist=(), level=0):
     module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
-    if name == "broker" or name.endswith(".broker"):
+    root = name.split(".", 1)[0]
+    if root == "broker":
         try:
             _install_broker(module)
         except Exception:
             pass
-    if name == "estrategia" or name.endswith(".estrategia"):
+    elif root == "estrategia":
         try:
             _install_strategy(module)
         except Exception:
@@ -342,4 +326,4 @@ def _import(name, globals=None, locals=None, fromlist=(), level=0):
     return module
 
 
-builtins.__import__ = _import
+builtins.__import__ = _import_hook
