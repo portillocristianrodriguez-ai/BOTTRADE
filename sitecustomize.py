@@ -127,16 +127,27 @@ def _install_strategy(strategy_module):
                 _PORTFOLIO["items"] = []
             raw = float(result.get("score", 0) or 0)
             penalty = 0.0
+            current_ticker = str(ticker).upper()
             for item in _PORTFOLIO["items"]:
+                if item["ticker"] == current_ticker:
+                    continue
                 corr = abs(_corr(df, item["df"]))
                 weight = min(1.0, max(0.0, item["score"] / 100.0))
                 penalty = max(penalty, 8.0 * corr * weight)
+            portfolio_score = max(0.0, min(100.0, raw - penalty))
             result = dict(result)
             result["raw_score"] = raw
-            result["portfolio_score"] = max(0.0, raw - penalty)
+            result["portfolio_score"] = portfolio_score
             result["correlation_penalty"] = penalty
-            _PORTFOLIO["items"].append({"ticker": str(ticker), "df": df, "score": raw})
-            _PORTFOLIO["items"] = sorted(_PORTFOLIO["items"], key=lambda x: x["score"], reverse=True)[:12]
+            # main.py already ordena y filtra por 'score': hacer que el score
+            # efectivo sea el score diversificado convierte la penalización
+            # de correlación en una decisión real de cartera.
+            if result.get("comprar", False):
+                result["score"] = portfolio_score
+                _PORTFOLIO["items"].append({"ticker": current_ticker, "df": df, "score": raw})
+                _PORTFOLIO["items"] = sorted(
+                    _PORTFOLIO["items"], key=lambda x: x["score"], reverse=True
+                )[:12]
             return result
         except Exception:
             return result
