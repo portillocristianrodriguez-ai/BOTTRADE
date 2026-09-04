@@ -27,7 +27,6 @@ def _client_id(order_data):
 
 
 def _disable_secondary_account(broker_module):
-    """Desactiva cualquier soporte legado de segunda cuenta."""
     if hasattr(broker_module, "cliente_trading_secundaria"):
         broker_module.cliente_trading_secundaria = None
 
@@ -40,7 +39,7 @@ def _disable_secondary_account(broker_module):
     if hasattr(broker_module, "obtener_resumen_cuenta_secundaria"):
         broker_module.obtener_resumen_cuenta_secundaria = _sin_segunda_cuenta
     if hasattr(broker_module, "obtener_posiciones_secundaria"):
-        broker_module.obtener_posiciones_secundaria = _sin_posiciones_secundarias
+        broker_module.obtener_posiciones_secundaria = _sin_posiciones_secundaria
 
 
 def _install_broker(broker_module):
@@ -134,7 +133,7 @@ def _install_broker(broker_module):
 
     def guarded_submit(order_data=None, *args, **kwargs):
         import execution_idempotency
-        return execution_idempotency.submit_order_idempotente(client, order_data)
+        return execution_idempotency.submit_order_idempotente(client, order_data, submit_callable=submit)
 
     broker_module.calcular_tamano_posicion = dynamic_size
     broker_module._validar_orden_compra_final = risk_check
