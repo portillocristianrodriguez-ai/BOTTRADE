@@ -14,13 +14,24 @@ import threading
 import estrategia
 
 
-_PATTERN_RUNTIME_LOCK = threading.RLock()
+_PATTERN_CONTEXT = threading.local()
 
 
 def _instalar_observacion_robusta(main_module):
-    original = getattr(main_module, "registrar_observacion_pattern", None)
-    if not callable(original) or getattr(original, "_bottrade_hardened", False):
+    original_observacion = getattr(main_module, "registrar_observacion_pattern", None)
+    original_sesion = getattr(main_module, "obtener_sesion_mercado", None)
+
+    if not callable(original_observacion) or not callable(original_sesion):
         return
+    if getattr(original_observacion, "_bottrade_hardened", False):
+        return
+
+    def sesion_contextual():
+        if getattr(_PATTERN_CONTEXT, "crypto_24_7", False):
+            return "CRYPTO_24_7"
+        return original_sesion()
+
+    main_module.obtener_sesion_mercado = sesion_contextual
 
     def registrar_observacion_pattern(ticker, df, analisis_scanner=None, senal=None):
         if df is None or getattr(df, "empty", True):
@@ -29,9 +40,9 @@ def _instalar_observacion_robusta(main_module):
         es_crypto = bool(main_module.broker.es_cripto(ticker))
         df_observacion = df
 
-        # El scanner crypto recibe datos OHLCV crudos, mientras que el
-        # motor de patrones espera columnas derivadas. Calculamos aquí
-        # los indicadores una sola vez antes de observar.
+        # El scanner crypto recibe OHLCV crudo, mientras que el motor de
+        # patrones espera columnas derivadas. Las completamos antes de
+        # observar para evitar RSI/ATR/volumen artificialmente iguales a 0.
         try:
             columnas_necesarias = {
                 "atr", "rsi", "macd", "ema_rapida", "ema_lenta",
@@ -45,18 +56,17 @@ def _instalar_observacion_robusta(main_module):
             )
             df_observacion = df
 
-        # obtener_sesion_mercado() pertenece al calendario de acciones.
-        # Para crypto no debemos etiquetar la observación como PREMARKET.
-        if es_crypto:
-            with _PATTERN_RUNTIME_LOCK:
-                sesion_original = main_module.obtener_sesion_mercado
-                main_module.obtener_sesion_mercado = lambda: "CRYPTO_24_7"
-                try:
-                    return original(ticker, df_observacion, analisis_scanner, senal)
-                finally:
-                    main_module.obtener_sesion_mercado = sesion_original
-
-        return original(ticker, df_observacion, analisis_scanner, senal)
+        anterior = getattr(_PATTERN_CONTEXT, "crypto_24_7", False)
+        _PATTERN_CONTEXT.crypto_24_7 = es_crypto
+        try:
+            return original_observacion(
+                ticker,
+                df_observacion,
+                analisis_scanner,
+                senal,
+            )
+        finally:
+            _PATTERN_CONTEXT.crypto_24_7 = anterior
 
     registrar_observacion_pattern._bottrade_hardened = True
     main_module.registrar_observacion_pattern = registrar_observacion_pattern
