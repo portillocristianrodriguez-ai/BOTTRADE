@@ -1,7 +1,8 @@
 """Pre-trade crypto execution-quality checks.
 
-No orders are sent here. The module evaluates the current bid/ask and
-order-book depth and returns both a hard gate and a recommended notional.
+No orders are sent here. The module evaluates the current bid/ask, order-book
+depth, imbalance and estimated market impact and returns a hard gate plus a
+recommended notional for the proposed BUY.
 """
 from __future__ import annotations
 
@@ -24,6 +25,15 @@ def _level_price_size(level):
         price = _num(level.get("price", level.get("p", price)))
         size = _num(level.get("size", level.get("s", size)))
     return price, size
+
+
+def _side_depth_usd(levels, limit=5):
+    total = 0.0
+    for level in list(levels or [])[:limit]:
+        price, size = _level_price_size(level)
+        if price > 0 and size > 0:
+            total += price * size
+    return total
 
 
 def _vwap_impact(asks, notional, mid):
@@ -55,14 +65,16 @@ def evaluate_crypto_orderbook(
     max_depth_ratio: float = 0.60,
     min_execution_notional_usd: float = 25.0,
 ) -> Dict[str, Any]:
-    """Evalúa spread, profundidad e impacto y propone un tamaño ejecutable."""
+    """Evalúa spread, profundidad, imbalance e impacto y propone un tamaño ejecutable."""
     proposed = max(0.0, _num(proposed_notional))
     result = {
         "ok": True,
         "reason": "disabled_or_unavailable",
         "spread_pct": None,
         "top_ask_depth_usd": None,
+        "top_bid_depth_usd": None,
         "depth_ratio": None,
+        "book_imbalance": None,
         "estimated_impact_pct": None,
         "recommended_notional": proposed,
     }
@@ -97,6 +109,11 @@ def evaluate_crypto_orderbook(
         mid = (ask_price + bid_price) / 2.0
         spread_pct = (ask_price - bid_price) / mid * 100.0
         top_depth = ask_price * ask_size
+        bid_depth = _side_depth_usd(bids, 5)
+        ask_depth = _side_depth_usd(asks, 5)
+        total_depth = bid_depth + ask_depth
+        imbalance = ((bid_depth - ask_depth) / total_depth) if total_depth > 0 else 0.0
+
         max_ratio = min(1.0, max(0.05, _num(max_depth_ratio, 0.60)))
         depth_ratio = proposed / top_depth if top_depth > 0 else math.inf
         impact_pct, unfilled = _vwap_impact(asks, proposed, mid)
@@ -104,7 +121,9 @@ def evaluate_crypto_orderbook(
         result.update({
             "spread_pct": spread_pct,
             "top_ask_depth_usd": top_depth,
+            "top_bid_depth_usd": bid_depth,
             "depth_ratio": depth_ratio,
+            "book_imbalance": imbalance,
             "estimated_impact_pct": impact_pct,
             "reason": "ok",
         })
@@ -119,6 +138,14 @@ def evaluate_crypto_orderbook(
         recommended = proposed
         if top_depth > 0 and (top_depth < max(0.0, _num(min_top_depth_usd, 1500.0)) or depth_ratio > max_ratio):
             recommended = min(recommended, top_depth * max_ratio)
+
+        # Para una compra, una pared de ventas muy superior a las compras
+        # disponibles suele implicar peor absorción inmediata. No bloqueamos
+        # por sí sola: reducimos tamaño de forma progresiva.
+        if imbalance < -0.20:
+            imbalance_factor = max(0.55, 1.0 + imbalance * 0.75)
+            recommended = min(recommended, proposed * imbalance_factor)
+            result["reason"] = "reduced_for_imbalance"
 
         impact_limit = max(0.10, spread_limit * 1.5)
         if unfilled > 0:
