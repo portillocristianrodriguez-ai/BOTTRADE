@@ -3,9 +3,9 @@
 Esta capa SOLO actualiza los símbolos observados/escaneados. No genera
 señales, no modifica órdenes y no toca la gestión de posiciones.
 
-El universo no se recorta artificialmente a N símbolos: incluye todas las
-acciones estadounidenses activas y negociables que devuelve Alpaca. La
-estrategia sigue siendo la responsable de filtrar oportunidades.
+El universo incluye todas las acciones estadounidenses activas y negociables
+que devuelve Alpaca. La estrategia sigue siendo la responsable de filtrar
+oportunidades.
 """
 from __future__ import annotations
 
@@ -18,11 +18,6 @@ _LOCK = threading.RLock()
 _CACHE = []
 _UPDATED = None
 _REFRESH_THREAD_STARTED = False
-
-_EXCHANGES = {
-    "NYSE", "NASDAQ", "NASDAQOM", "NASDAQGS", "NASDAQCM", "NASDAQGM",
-    "NYSEARCA", "NYSEAMERICAN", "AMEX", "ARCA", "BATS", "IEXG",
-}
 
 
 def _text(value):
@@ -50,9 +45,6 @@ def _es_accion_us_tradable(asset):
         return False
     asset_class = _text(getattr(asset, "asset_class", ""))
     if asset_class and asset_class != "US_EQUITY":
-        return False
-    exchange = _text(getattr(asset, "exchange", ""))
-    if exchange and exchange not in _EXCHANGES:
         return False
     return True
 
