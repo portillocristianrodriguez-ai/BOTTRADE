@@ -3,6 +3,7 @@ Notificaciones y comandos por Telegram.
 """
 
 import logging
+import os
 import threading
 import time
 
@@ -13,9 +14,12 @@ import config
 
 log = logging.getLogger(__name__)
 
-# Solo puede existir un listener de getUpdates por proceso.
+# Un único receptor por proceso y, adicionalmente, un lock de fichero
+# para impedir dos listeners si accidentalmente se lanzan dos procesos
+# dentro del mismo contenedor.
 _comandos_lock = threading.Lock()
 _comandos_iniciado = False
+_lockfile_fd = None
 
 
 # ============================================================
@@ -23,19 +27,12 @@ _comandos_iniciado = False
 # ============================================================
 
 def notificar(mensaje: str):
-    if (
-        not config.TELEGRAM_BOT_TOKEN
-        or not config.TELEGRAM_CHAT_ID
-    ):
-        log.warning(
-            "[Telegram] Token o Chat ID no configurados."
-        )
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        log.warning("[Telegram] Token o Chat ID no configurados.")
         return False
 
     if not mensaje:
-        log.warning(
-            "[Telegram] Se intentó enviar un mensaje vacío."
-        )
+        log.warning("[Telegram] Se intentó enviar un mensaje vacío.")
         return False
 
     try:
@@ -44,55 +41,73 @@ def notificar(mensaje: str):
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{mensaje}"
         )
-
         url = (
             f"https://api.telegram.org/"
             f"bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
         )
-
         respuesta = requests.post(
             url,
-            json={
-                "chat_id": config.TELEGRAM_CHAT_ID,
-                "text": mensaje_final,
-            },
+            json={"chat_id": config.TELEGRAM_CHAT_ID, "text": mensaje_final},
             timeout=10,
         )
-
         respuesta.raise_for_status()
-
         datos = respuesta.json()
-
         if not datos.get("ok"):
-            log.error(
-                f"[Telegram] Error de API: {datos}"
-            )
+            log.error(f"[Telegram] Error de API: {datos}")
             return False
-
         log.info(
-            f"[Telegram] Notificación enviada correctamente "
-            f"({config.BOT_NOMBRE})."
+            f"[Telegram] Notificación enviada correctamente ({config.BOT_NOMBRE})."
         )
+        return True
+    except requests.exceptions.Timeout:
+        log.warning("[Telegram] Timeout enviando notificación.")
+        return False
+    except requests.exceptions.RequestException as e:
+        log.warning(f"[Telegram] Error de conexión: {e}")
+        return False
+    except Exception as e:
+        log.warning(f"[Telegram] Error inesperado: {e}")
+        return False
 
+
+# ============================================================
+# LOCK ÚNICO DEL RECEPTOR
+# ============================================================
+
+def _adquirir_lock_receptor():
+    """Adquiere un lock de proceso/contenedor para getUpdates."""
+    global _lockfile_fd
+    ruta = "/tmp/bottrade_telegram_getupdates.lock"
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        _lockfile_fd = os.open(ruta, flags, 0o600)
+        os.write(_lockfile_fd, str(os.getpid()).encode("ascii"))
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        # El lock de fichero es una defensa adicional; si el sistema no lo
+        # permite, el lock de Python sigue evitando duplicados en el proceso.
+        log.warning(f"[Telegram] No se pudo crear lock de receptor: {e}")
         return True
 
-    except requests.exceptions.Timeout:
-        log.warning(
-            "[Telegram] Timeout enviando notificación."
-        )
-        return False
 
-    except requests.exceptions.RequestException as e:
-        log.warning(
-            f"[Telegram] Error de conexión: {e}"
-        )
-        return False
-
-    except Exception as e:
-        log.warning(
-            f"[Telegram] Error inesperado: {e}"
-        )
-        return False
+def _liberar_lock_receptor():
+    global _lockfile_fd
+    if _lockfile_fd is None:
+        return
+    ruta = "/tmp/bottrade_telegram_getupdates.lock"
+    try:
+        os.close(_lockfile_fd)
+    except Exception:
+        pass
+    _lockfile_fd = None
+    try:
+        os.unlink(ruta)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -100,11 +115,7 @@ def notificar(mensaje: str):
 # ============================================================
 
 def iniciar_comandos(callback):
-    """
-    Inicia un único hilo independiente que escucha comandos
-    enviados por Telegram. Las llamadas duplicadas dentro del
-    mismo proceso se ignoran para evitar dos receptores.
-    """
+    """Inicia exactamente un receptor getUpdates por contenedor/proceso."""
     global _comandos_iniciado
 
     with _comandos_lock:
@@ -115,13 +126,17 @@ def iniciar_comandos(callback):
             )
             return False
 
-        if (
-            not config.TELEGRAM_BOT_TOKEN
-            or not config.TELEGRAM_CHAT_ID
-        ):
+        if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
             log.warning(
                 "[Telegram] No se inicia el receptor: "
                 "Token o Chat ID no configurados."
+            )
+            return False
+
+        if not _adquirir_lock_receptor():
+            log.warning(
+                "[Telegram] Ya existe otro receptor local de getUpdates; "
+                "este proceso no iniciará un segundo receptor."
             )
             return False
 
@@ -133,14 +148,10 @@ def iniciar_comandos(callback):
         daemon=True,
         name="TelegramComandos",
     )
-
     hilo.start()
-
     log.info(
-        "[Telegram] Monitor de comandos iniciado. "
-        "Receptor único activo."
+        "[Telegram] Monitor de comandos iniciado. Receptor único activo."
     )
-
     return True
 
 
@@ -149,203 +160,116 @@ def iniciar_comandos(callback):
 # ============================================================
 
 def _loop_comandos(callback):
-
     offset = None
     conflictos_409 = 0
-
     url = (
         f"https://api.telegram.org/"
         f"bot{config.TELEGRAM_BOT_TOKEN}/getUpdates"
     )
+    log.info("[Telegram] Escuchando comandos...")
 
-    log.info(
-        "[Telegram] Escuchando comandos..."
-    )
+    try:
+        while True:
+            try:
+                parametros = {
+                    "timeout": 25,
+                    "allowed_updates": ["message"],
+                }
+                if offset is not None:
+                    parametros["offset"] = offset
 
-    while True:
-
-        try:
-
-            parametros = {
-                "timeout": 25,
-                "allowed_updates": ["message"],
-            }
-
-            if offset is not None:
-                parametros["offset"] = offset
-
-            respuesta = requests.get(
-                url,
-                params=parametros,
-                timeout=35,
-            )
-
-            if respuesta.status_code == 409:
-
-                conflictos_409 += 1
-
-                espera = min(
-                    60,
-                    15 * conflictos_409,
+                respuesta = requests.get(
+                    url,
+                    params=parametros,
+                    timeout=35,
                 )
 
-                log.warning(
-                    "[Telegram] Conflicto 409: existe "
-                    "otro receptor de getUpdates. "
-                    f"Reintentando en {espera}s "
-                    f"(intento {conflictos_409})."
-                )
-
-                time.sleep(espera)
-                continue
-
-            conflictos_409 = 0
-
-            if respuesta.status_code != 200:
-
-                log.error(
-                    "[Telegram] "
-                    f"Error getUpdates: "
-                    f"{respuesta.status_code}"
-                )
-
-                time.sleep(5)
-                continue
-
-            datos = respuesta.json()
-
-            if not datos.get("ok"):
-
-                log.error(
-                    f"[Telegram] Error API getUpdates: "
-                    f"{datos}"
-                )
-
-                time.sleep(5)
-                continue
-
-            for update in datos.get(
-                "result",
-                [],
-            ):
-
-                offset = (
-                    update["update_id"]
-                    + 1
-                )
-
-                mensaje = update.get(
-                    "message"
-                )
-
-                if not mensaje:
-                    continue
-
-                chat = mensaje.get(
-                    "chat",
-                    {}
-                )
-
-                chat_id = str(
-                    chat.get(
-                        "id",
-                        ""
-                    )
-                )
-
-                if chat_id != str(
-                    config.TELEGRAM_CHAT_ID
-                ):
-
+                if respuesta.status_code == 409:
+                    conflictos_409 += 1
+                    espera = min(60, 15 * conflictos_409)
                     log.warning(
-                        "[Telegram] "
-                        "Comando ignorado de "
-                        "chat no autorizado."
+                        "[Telegram] Conflicto 409: existe otro receptor de "
+                        "getUpdates fuera de este proceso. "
+                        f"Reintentando en {espera}s (intento {conflictos_409})."
                     )
-
+                    time.sleep(espera)
                     continue
 
-                texto = str(
-                    mensaje.get(
-                        "text",
-                        ""
-                    )
-                ).strip()
+                conflictos_409 = 0
 
-                if not texto:
-                    continue
-
-                if not texto.startswith("/"):
-                    continue
-
-                comando = (
-                    texto
-                    .split()[0]
-                    .lower()
-                )
-
-                if "@" in comando:
-                    comando = comando.split(
-                        "@"
-                    )[0]
-
-                log.info(
-                    "[Telegram] "
-                    f"Comando recibido: "
-                    f"{comando}"
-                )
-
-                try:
-
-                    respuesta_comando = callback(
-                        comando
-                    )
-
-                    if respuesta_comando:
-
-                        notificar(
-                            respuesta_comando
-                        )
-
-                    else:
-
-                        log.warning(
-                            "[Telegram] "
-                            f"El comando {comando} "
-                            "no devolvió respuesta."
-                        )
-
-                except Exception as e:
-
+                if respuesta.status_code == 404:
+                    # Un 404 repetido no se arregla reintentando: normalmente
+                    # indica token inválido/revocado. Detenemos el polling para
+                    # no llenar los logs y no crear un falso estado operativo.
                     log.error(
-                        "[Telegram] "
-                        f"Error ejecutando "
-                        f"{comando}: {e}"
+                        "[Telegram] getUpdates devolvió 404. El token del bot "
+                        "no es válido/está revocado. Receptor detenido; "
+                        "las notificaciones salientes permanecen independientes."
                     )
+                    return
 
-                    notificar(
-                        f"❌ Error ejecutando "
-                        f"{comando}."
+                if respuesta.status_code != 200:
+                    log.error(
+                        f"[Telegram] Error getUpdates: {respuesta.status_code}"
                     )
+                    time.sleep(5)
+                    continue
 
-        except requests.exceptions.Timeout:
-            continue
+                datos = respuesta.json()
+                if not datos.get("ok"):
+                    log.error(f"[Telegram] Error API getUpdates: {datos}")
+                    time.sleep(5)
+                    continue
 
-        except requests.exceptions.RequestException as e:
+                for update in datos.get("result", []):
+                    offset = update["update_id"] + 1
+                    mensaje = update.get("message")
+                    if not mensaje:
+                        continue
 
-            log.error(
-                "[Telegram] "
-                f"Error de conexión "
-                f"monitorizando comandos: {e}"
-            )
+                    chat = mensaje.get("chat", {})
+                    chat_id = str(chat.get("id", ""))
+                    if chat_id != str(config.TELEGRAM_CHAT_ID):
+                        log.warning(
+                            "[Telegram] Comando ignorado de chat no autorizado."
+                        )
+                        continue
 
-            time.sleep(5)
+                    texto = str(mensaje.get("text", "")).strip()
+                    if not texto or not texto.startswith("/"):
+                        continue
 
-        except Exception as e:
+                    comando = texto.split()[0].lower()
+                    if "@" in comando:
+                        comando = comando.split("@")[0]
 
-            log.error(
-                "[Telegram] "
-                f"Error monitorizando comandos: {e}"
-            )
+                    log.info(f"[Telegram] Comando recibido: {comando}")
+                    try:
+                        respuesta_comando = callback(comando)
+                        if respuesta_comando:
+                            notificar(respuesta_comando)
+                        else:
+                            log.warning(
+                                f"[Telegram] El comando {comando} no devolvió respuesta."
+                            )
+                    except Exception as e:
+                        log.error(
+                            f"[Telegram] Error ejecutando {comando}: {e}"
+                        )
+                        notificar(f"❌ Error ejecutando {comando}.")
 
-            time.sleep(5)
+            except requests.exceptions.Timeout:
+                continue
+            except requests.exceptions.RequestException as e:
+                log.error(
+                    f"[Telegram] Error de conexión monitorizando comandos: {e}"
+                )
+                time.sleep(5)
+            except Exception as e:
+                log.error(f"[Telegram] Error monitorizando comandos: {e}")
+                time.sleep(5)
+    finally:
+        with _comandos_lock:
+            _comandos_iniciado = False
+            _liberar_lock_receptor()
+        log.warning("[Telegram] Receptor de comandos detenido.")
