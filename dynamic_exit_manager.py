@@ -10,6 +10,7 @@ from dynamic_exit import evaluar_salida
 
 _LOCK = threading.RLock()
 _LAST_ACTION = {}
+_TIGHTENED_TRAIL = {}
 _COOLDOWN_SECONDS = 90.0
 
 
@@ -19,6 +20,43 @@ def _num(value, default=0.0):
         return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
+
+
+def calcular_retroceso_trailing(maximo, precio_actual):
+    """Devuelve el retroceso porcentual desde el máximo alcanzado."""
+    maximo = _num(maximo)
+    precio_actual = _num(precio_actual)
+    if maximo <= 0 or precio_actual <= 0 or precio_actual > maximo:
+        return 0.0
+    return max(0.0, (maximo - precio_actual) / maximo)
+
+
+def registrar_trailing_mas_estricto(ticker, trail_pct):
+    """Registra un trailing más protector y nunca permite relajarlo."""
+    ticker = str(ticker or "").upper()
+    trail_pct = abs(_num(trail_pct, 0.015))
+    if not ticker or trail_pct <= 0:
+        return None
+    trail_pct = max(0.0025, min(0.05, trail_pct))
+    with _LOCK:
+        anterior = _TIGHTENED_TRAIL.get(ticker)
+        if anterior is None:
+            nuevo = trail_pct
+        else:
+            nuevo = min(float(anterior), trail_pct)
+        _TIGHTENED_TRAIL[ticker] = nuevo
+        return nuevo
+
+
+def obtener_trailing_estricto(ticker, default=0.015):
+    with _LOCK:
+        return float(_TIGHTENED_TRAIL.get(str(ticker or "").upper(), default))
+
+
+def limpiar_trailing(ticker):
+    with _LOCK:
+        _TIGHTENED_TRAIL.pop(str(ticker or "").upper(), None)
+        _LAST_ACTION.pop(str(ticker or "").upper(), None)
 
 
 def _partial_sell(broker, ticker, fraction):
@@ -77,6 +115,7 @@ def _obtener_contexto(broker, ticker, position):
             return None
         analysis = estrategia.analizar_impulso_crypto(df, ticker)
         return {
+            "precio_actual": precio,
             "pnl_pct": _num(getattr(position, "unrealized_plpc", 0)),
             "atr_pct": atr / precio,
             "momentum_pct": _num(analysis.get("momentum_pct", 0)),
@@ -89,6 +128,59 @@ def _obtener_contexto(broker, ticker, position):
         return None
 
 
+def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
+    """Ejecuta salida completa solo una vez por ventana de seguridad."""
+    now = time.time()
+    with _LOCK:
+        previous = _LAST_ACTION.get(ticker)
+        if previous and now - previous < _COOLDOWN_SECONDS:
+            return False
+        _LAST_ACTION[ticker] = now
+
+    try:
+        lock = getattr(main_module, "_lock_operaciones", _LOCK)
+        with lock:
+            if not broker.tiene_posicion_abierta(ticker):
+                return False
+            mensaje = broker.vender(ticker)
+        if mensaje and log:
+            log.warning("[DYNAMIC-EXIT] %s salida completa ejecutada: %s", ticker, motivo)
+            try:
+                main_module.notificaciones.notificar(
+                    f"📉 DYNAMIC EXIT {ticker}\n{motivo}\n{mensaje}"
+                )
+            except Exception:
+                pass
+        return bool(mensaje)
+    except Exception as exc:
+        if log:
+            log.warning("[DYNAMIC-EXIT] %s salida %s omitida: %s", ticker, motivo, exc)
+        return False
+
+
+def _gestionar_trailing_estricto(main_module, broker, ticker, ctx, log):
+    """Aplica de verdad el trailing adaptativo en la siguiente observación."""
+    if ctx["pnl_pct"] <= 0:
+        return False
+
+    maximos = getattr(main_module, "_maximos_cripto", {})
+    maximo = max(_num(maximos.get(ticker, ctx["precio_actual"])), ctx["precio_actual"])
+    maximos[ticker] = maximo
+
+    trail = obtener_trailing_estricto(ticker, _num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015))
+    retroceso = calcular_retroceso_trailing(maximo, ctx["precio_actual"])
+    if retroceso < trail:
+        return False
+
+    return _ejecutar_exit_si_corresponde(
+        main_module,
+        broker,
+        ticker,
+        log,
+        f"trailing adaptativo {retroceso:.2%} >= {trail:.2%}",
+    )
+
+
 def _gestionar_previamente(main_module):
     broker = getattr(main_module, "broker", None)
     if broker is None:
@@ -98,53 +190,77 @@ def _gestionar_previamente(main_module):
     except Exception:
         return
 
+    presentes = set()
     now = time.time()
+    log = getattr(main_module, "log", None)
+
     for position in posiciones:
         ticker = getattr(position, "symbol", None)
         if not ticker or not broker.es_cripto(ticker):
             continue
         ticker = broker.normalizar_ticker_crypto(ticker)
+        presentes.add(ticker)
         ctx = _obtener_contexto(broker, ticker, position)
         if not ctx:
             continue
 
         decision = evaluar_salida(
-            **ctx,
+            pnl_pct=ctx["pnl_pct"],
+            atr_pct=ctx["atr_pct"],
+            momentum_pct=ctx["momentum_pct"],
+            rsi=ctx["rsi"],
+            adx=ctx["adx"],
+            regimen=ctx["regimen"],
+            breakout=ctx["breakout"],
             trailing_stop_pct=_num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015),
         )
         action = decision.get("action", "hold")
-        if action == "hold":
+
+        # El HWM se mantiene incluso cuando no hay una decisión de salida.
+        maximos = getattr(main_module, "_maximos_cripto", {})
+        maximos[ticker] = max(_num(maximos.get(ticker, ctx["precio_actual"])), ctx["precio_actual"])
+
+        if action == "tighten":
+            stop = _num(decision.get("recommended_stop_pct"))
+            if stop > 0:
+                efectivo = registrar_trailing_mas_estricto(ticker, stop)
+                if log:
+                    log.info("[DYNAMIC-EXIT] %s trailing ADAPTATIVO=%0.3f%%", ticker, efectivo * 100.0)
+            # Una vez estrechado, se comprueba inmediatamente el umbral contra el HWM.
+            if _gestionar_trailing_estricto(main_module, broker, ticker, ctx, log):
+                limpiar_trailing(ticker)
             continue
 
-        with _LOCK:
-            previous = _LAST_ACTION.get(ticker)
-            if previous and now - previous < _COOLDOWN_SECONDS:
-                continue
-            _LAST_ACTION[ticker] = now
-
-        log = getattr(main_module, "log", None)
-        if log:
-            log.info(
-                "[DYNAMIC-EXIT] %s action=%s pnl=%.2f%% mom=%.2f%% score=%.1f reasons=%s",
-                ticker, action, ctx["pnl_pct"] * 100.0, ctx["momentum_pct"],
-                _num(decision.get("score")), ",".join(decision.get("reasons", [])),
-            )
-
-        try:
-            lock = getattr(main_module, "_lock_operaciones", _LOCK)
-            with lock:
-                if action == "reduce":
+        if action == "reduce":
+            with _LOCK:
+                previous = _LAST_ACTION.get(ticker)
+                if previous and now - previous < _COOLDOWN_SECONDS:
+                    continue
+                _LAST_ACTION[ticker] = now
+            try:
+                lock = getattr(main_module, "_lock_operaciones", _LOCK)
+                with lock:
                     order = _partial_sell(broker, ticker, decision.get("reduce_fraction", 0.50))
-                    if order is not None and log:
-                        log.warning("[DYNAMIC-EXIT] %s reducción parcial enviada", ticker)
-                elif action == "exit":
-                    broker.vender(ticker)
-                elif action == "tighten" and log:
-                    stop = _num(decision.get("recommended_stop_pct"))
-                    log.info("[DYNAMIC-EXIT] %s trailing recomendado=%.3f%%", ticker, stop * 100.0)
-        except Exception as exc:
-            if log:
-                log.warning("[DYNAMIC-EXIT] %s acción %s omitida: %s", ticker, action, exc)
+                if order is not None and log:
+                    log.warning("[DYNAMIC-EXIT] %s reducción parcial enviada", ticker)
+            except Exception as exc:
+                if log:
+                    log.warning("[DYNAMIC-EXIT] %s reducción parcial omitida: %s", ticker, exc)
+            continue
+
+        if action == "exit":
+            if _ejecutar_exit_si_corresponde(
+                main_module,
+                broker,
+                ticker,
+                log,
+                ", ".join(decision.get("reasons", [])) or "deterioro confirmado",
+            ):
+                limpiar_trailing(ticker)
+
+    for ticker in list(_TIGHTENED_TRAIL):
+        if ticker not in presentes:
+            limpiar_trailing(ticker)
 
 
 def instalar(main_module):
@@ -163,4 +279,10 @@ def instalar(main_module):
     return True
 
 
-__all__ = ["instalar"]
+__all__ = [
+    "calcular_retroceso_trailing",
+    "registrar_trailing_mas_estricto",
+    "obtener_trailing_estricto",
+    "limpiar_trailing",
+    "instalar",
+]
