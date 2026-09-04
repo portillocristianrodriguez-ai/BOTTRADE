@@ -115,12 +115,12 @@ def _analizar_impulso(df, ticker, es_crypto=False):
         slope_ref = float(datos.iloc[i - 3]["ema_rapida"])
         slope = ((ema_f - slope_ref) / slope_ref * 100) if slope_ref > 0 else 0.0
         slope_ok = slope > 0
-        vol_min = float(config.CRYPTO_VOLUME_MIN_MULTIPLIER) if es_crypto else float(config.VOLUMEN_MIN_MULTIPLICADOR)
+        vol_min = float(config.CRYPTO_VOLUME_MIN_MULTIPLICADOR) if es_crypto else float(config.VOLUMEN_MIN_MULTIPLICADOR)
         vol_ok = vol >= vol_min
         rsi_min = float(config.CRYPTO_RSI_MIN) if es_crypto else 50.0
         rsi_max = float(config.CRYPTO_RSI_MAX) if es_crypto else 68.0
         rsi_ok = rsi_min <= rsi <= rsi_max
-        mom_min = float(config.CRYPTO_MIN_MOMENTUM_PCT) if es_crypto else float(config.CRYPTO_MIN_MOMENTUM_PCT)
+        mom_min = float(config.CRYPTO_MIN_MOMENTUM_PCT)
         mom_ok = momentum >= mom_min
         atr_ok = atr_pct >= float(config.ATR_MIN_PCT) * 100
         no_ext = momentum <= float(config.CRYPTO_MAX_RISE_PCT)
@@ -142,7 +142,7 @@ def _analizar_impulso(df, ticker, es_crypto=False):
         if not atr_ok: motivos.append("ATR insuficiente")
         if not no_ext: motivos.append("movimiento demasiado extendido")
         if not macd_ok: motivos.append("MACD negativo")
-        comprar = score >= float(config.CRYPTO_MIN_SCORE) and sobre_tendencia and emas and slope_ok and vol_ok and rsi_ok and mom_ok and atr_ok and no_ext and macd_ok
+        comprar = score >= float(config.CRYPTO_SCORE_MINIMO) and sobre_tendencia and emas and slope_ok and vol_ok and rsi_ok and mom_ok and atr_ok and no_ext and macd_ok
         return {"score": float(min(score, 100.0)), "comprar": bool(comprar), "motivo": motivos, "rsi": rsi, "volumen_ratio": vol, "momentum_pct": momentum, "atr_pct": atr_pct, "breakout": bool(breakout)}
     except Exception as e:
         print(f"[{ 'crypto' if es_crypto else 'acciones' } scanner] {ticker}: error analizando impulso: {e}")
