@@ -5,6 +5,7 @@ import main as bot
 import safety_hardening
 import after_hours_hardening
 import telegram_hardening
+import telegram_startup_summary
 import worker
 
 
