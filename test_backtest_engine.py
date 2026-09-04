@@ -27,10 +27,8 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_entry_is_next_bar_open(self):
         data = self._data()
-        calls = {"n": 0}
 
         def signal(df):
-            calls["n"] += 1
             return "COMPRAR" if len(df) == 210 else "VENDER" if len(df) == 211 else "ESPERAR"
 
         stats, _, trades = run(data, signal_fn=signal, slippage_bps=0, fee_bps=0)
@@ -38,13 +36,17 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(trades[0].entry_time, data.index[210])
         self.assertEqual(trades[0].entry, float(data.iloc[210]["open"]))
 
-    def test_summary_drawdown_and_profit_factor(self):
+    def test_summary_drawdown_profit_factor_and_risk_metrics(self):
         trades = []
-        equity = pd.Series([100, 110, 99, 120], index=pd.date_range("2024-01-01", periods=4))
+        equity = pd.Series([100, 110, 99, 120], index=pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC"))
         stats = resumen(trades, equity, 100)
         self.assertAlmostEqual(stats["total_return_pct"], 20.0)
         self.assertLess(stats["max_drawdown_pct"], 0.0)
         self.assertEqual(stats["trades"], 0)
+        self.assertIn("cagr_pct", stats)
+        self.assertIn("sortino_annualized", stats)
+        self.assertIn("calmar", stats)
+        self.assertGreater(stats["periods_per_year"], 200)
 
 
 if __name__ == "__main__":
