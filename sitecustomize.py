@@ -9,6 +9,7 @@ from __future__ import annotations
 import builtins
 import math
 import time
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 _INSTALLED_BROKER = False
 _INSTALLED_STRATEGY = False
@@ -49,6 +50,31 @@ def _execution_quality_notional(broker_module, ticker, proposed):
         return proposed, "unavailable"
 
 
+def _normalizar_qty_crypto(broker_module, ticker, qty):
+    """Respecta min_order_size y min_trade_increment publicados por Alpaca."""
+    try:
+        symbol = broker_module.normalizar_ticker_crypto(ticker)
+        asset = broker_module.cliente_trading.get_asset(symbol)
+        raw_qty = Decimal(str(qty))
+        minimum = Decimal(str(getattr(asset, "min_order_size", "0") or "0"))
+        increment = Decimal(str(getattr(asset, "min_trade_increment", "0") or "0"))
+        if raw_qty <= 0:
+            return 0.0
+        if minimum > 0 and raw_qty < minimum:
+            return 0.0
+        if increment > 0:
+            steps = ((raw_qty - minimum) / increment).to_integral_value(rounding=ROUND_DOWN)
+            raw_qty = minimum + max(Decimal("0"), steps) * increment
+        if minimum > 0 and raw_qty < minimum:
+            return 0.0
+        return float(raw_qty)
+    except (InvalidOperation, ValueError, TypeError):
+        return float(qty)
+    except Exception as exc:
+        broker_module.log.warning(f"[SIZING] {ticker}: no se pudo normalizar incremento crypto: {exc}")
+        return float(qty)
+
+
 def _install_broker(broker_module):
     global _INSTALLED_BROKER
     if _INSTALLED_BROKER:
@@ -61,7 +87,7 @@ def _install_broker(broker_module):
         return
 
     def dynamic_size(ticker, precio, atr):
-        """Ajusta tamaño por volatilidad y, en crypto, por liquidez real."""
+        """Ajusta tamaño por volatilidad, liquidez y reglas del activo."""
         qty = size_original(ticker, precio, atr)
         try:
             import config
@@ -92,7 +118,7 @@ def _install_broker(broker_module):
                     razon_txt = f" liquidez={razon}"
                 else:
                     razon_txt = ""
-                ajustada = round(ajustada, 6)
+                ajustada = _normalizar_qty_crypto(broker_module, ticker, round(ajustada, 9))
             else:
                 ajustada = max(1, int(ajustada))
                 razon_txt = ""
