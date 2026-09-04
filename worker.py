@@ -10,7 +10,6 @@ from execution_stream import lanzar_stream_ejecuciones
 _PATTERN_CONTEXT = threading.local()
 _PATTERN_RUNTIME_LOCK = threading.RLock()
 _SIGNAL_CONTEXT = threading.local()
-_SIZING_RUNTIME_LOCK = threading.RLock()
 
 
 def _instalar_observacion_robusta(main_module):
@@ -74,14 +73,27 @@ def _instalar_ranking_crypto(main_module):
         if not isinstance(resultado, dict):
             return resultado
         try:
-            volumen = 0.0
+            volumen_dolar_medio = 0.0
             if df is not None and not getattr(df, "empty", True):
                 ultimas = df.tail(12)
-                volumen = float((ultimas["close"] * ultimas["volume"]).mean())
-            resultado = crypto_ranker.enriquecer_candidatos(
-                [(ticker, df, resultado)]
-            )[0][2]
-            resultado["ranking_score"] = resultado.get("portfolio_score", resultado.get("score", 0))
+                volumen_dolar_medio = float((ultimas["close"] * ultimas["volume"]).mean())
+
+            signal_score = float(resultado.get("score", 0.0) or 0.0)
+            portfolio_score = crypto_ranker.calcular_score_cartera(
+                resultado,
+                volumen_dolar_medio,
+            )
+
+            resultado = dict(resultado)
+            resultado["signal_score"] = signal_score
+            resultado["volumen_dolar_medio"] = volumen_dolar_medio
+            resultado["portfolio_score"] = portfolio_score
+            resultado["ranking_score"] = portfolio_score
+
+            # El scanner legacy ordena por `score`. Hacemos que ese campo
+            # represente el ranking de cartera, conservando la señal original
+            # para trazabilidad y sin alterar las defensas de ejecución.
+            resultado["score"] = portfolio_score
             return resultado
         except Exception as exc:
             main_module.log.warning("[ranking] %s: ranking omitido: %s", ticker, exc)
