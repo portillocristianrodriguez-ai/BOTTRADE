@@ -8,6 +8,8 @@ import time
 import estrategia
 from dynamic_exit import evaluar_salida
 from orderbook_exit import obtener_contexto_orderbook
+from microstructure_memory import registrar as registrar_microestructura
+from microstructure_memory import confirmar_deterioro
 
 _LOCK = threading.RLock()
 _LAST_ACTION = {}
@@ -24,7 +26,6 @@ def _num(value, default=0.0):
 
 
 def calcular_retroceso_trailing(maximo, precio_actual):
-    """Devuelve el retroceso porcentual desde el máximo alcanzado."""
     maximo = _num(maximo)
     precio_actual = _num(precio_actual)
     if maximo <= 0 or precio_actual <= 0 or precio_actual > maximo:
@@ -33,7 +34,6 @@ def calcular_retroceso_trailing(maximo, precio_actual):
 
 
 def registrar_trailing_mas_estricto(ticker, trail_pct):
-    """Registra un trailing más protector y nunca permite relajarlo."""
     ticker = str(ticker or "").upper()
     trail_pct = abs(_num(trail_pct, 0.015))
     if not ticker or trail_pct <= 0:
@@ -59,7 +59,6 @@ def limpiar_trailing(ticker):
 
 
 def _partial_sell(broker, ticker, fraction):
-    """Vende parcialmente una posición crypto sin competir con otra SELL."""
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
 
@@ -117,6 +116,8 @@ def _obtener_contexto(broker, ticker, position):
             getattr(broker, "cliente_datos_crypto", None),
             broker.normalizar_ticker_crypto(ticker),
         )
+        if book.get("available"):
+            registrar_microestructura(ticker, book.get("book_imbalance"), book.get("spread_pct"))
         return {
             "precio_actual": precio,
             "pnl_pct": _num(getattr(position, "unrealized_plpc", 0)),
@@ -135,14 +136,12 @@ def _obtener_contexto(broker, ticker, position):
 
 
 def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
-    """Ejecuta salida completa solo una vez por ventana de seguridad."""
     now = time.time()
     with _LOCK:
         previous = _LAST_ACTION.get(ticker)
         if previous and now - previous < _COOLDOWN_SECONDS:
             return False
         _LAST_ACTION[ticker] = now
-
     try:
         lock = getattr(main_module, "_lock_operaciones", _LOCK)
         with lock:
@@ -166,27 +165,17 @@ def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
 
 
 def _gestionar_trailing_estricto(main_module, broker, ticker, ctx, log):
-    """Comprueba siempre el trailing adaptativo ya endurecido."""
     if ctx["pnl_pct"] <= 0:
         return False
-
     maximos = getattr(main_module, "_maximos_cripto", {})
     maximo = max(_num(maximos.get(ticker, ctx["precio_actual"])), ctx["precio_actual"])
     maximos[ticker] = maximo
-
     default_trail = _num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015)
     trail = obtener_trailing_estricto(ticker, default_trail)
     retroceso = calcular_retroceso_trailing(maximo, ctx["precio_actual"])
     if retroceso < trail:
         return False
-
-    return _ejecutar_exit_si_corresponde(
-        main_module,
-        broker,
-        ticker,
-        log,
-        f"trailing adaptativo {retroceso:.2%} >= {trail:.2%}",
-    )
+    return _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, f"trailing adaptativo {retroceso:.2%} >= {trail:.2%}")
 
 
 def _gestionar_previamente(main_module):
@@ -197,7 +186,6 @@ def _gestionar_previamente(main_module):
         posiciones = broker.obtener_todas_las_posiciones()
     except Exception:
         return
-
     presentes = set()
     log = getattr(main_module, "log", None)
 
@@ -227,10 +215,26 @@ def _gestionar_previamente(main_module):
             regimen=ctx["regimen"],
             breakout=ctx["breakout"],
             spread_pct=ctx["spread_pct"] if ctx["orderbook_available"] else None,
-            orderbook_imbalance=(ctx["orderbook_imbalance"] if ctx["orderbook_available"] else None),
+            orderbook_imbalance=ctx["orderbook_imbalance"] if ctx["orderbook_available"] else None,
             trailing_stop_pct=_num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015),
         )
         action = decision.get("action", "hold")
+
+        # Las acciones inducidas por microestructura requieren persistencia:
+        # una lectura adversa aislada no dispara reduce/exit.
+        if action in {"reduce", "exit"} and ctx["orderbook_available"]:
+            confirmation = confirmar_deterioro(ticker, min_samples=3)
+            has_book_reason = any(x in decision.get("reasons", []) for x in ("adverse_orderbook", "wide_spread"))
+            if has_book_reason and not confirmation["confirmed"]:
+                decision = dict(decision)
+                decision["reasons"] = [x for x in decision.get("reasons", []) if x not in ("adverse_orderbook", "wide_spread")]
+                if not decision["reasons"]:
+                    decision["action"] = "hold"
+                else:
+                    decision["action"] = "tighten"
+                action = decision["action"]
+                if log:
+                    log.info("[DYNAMIC-EXIT] %s microestructura transitoria: %s", ticker, confirmation["reason"])
 
         if action == "tighten":
             stop = _num(decision.get("recommended_stop_pct"))
@@ -262,13 +266,7 @@ def _gestionar_previamente(main_module):
             continue
 
         if action == "exit":
-            if _ejecutar_exit_si_corresponde(
-                main_module,
-                broker,
-                ticker,
-                log,
-                ", ".join(decision.get("reasons", [])) or "deterioro confirmado",
-            ):
+            if _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, ", ".join(decision.get("reasons", [])) or "deterioro confirmado"):
                 limpiar_trailing(ticker)
 
     for ticker in list(_TIGHTENED_TRAIL):
@@ -277,15 +275,12 @@ def _gestionar_previamente(main_module):
 
 
 def instalar(main_module):
-    """Conecta el motor antes de la gestión legacy de protección."""
     original = getattr(main_module, "gestionar_posiciones_crypto", None)
     if not callable(original) or getattr(original, "_dynamic_exit_installed", False):
         return False
-
     def wrapper():
         _gestionar_previamente(main_module)
         return original()
-
     wrapper._dynamic_exit_installed = True
     main_module.gestionar_posiciones_crypto = wrapper
     main_module.log.info("[DYNAMIC-EXIT] Motor de salidas adaptativas conectado.")
