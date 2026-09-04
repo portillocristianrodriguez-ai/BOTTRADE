@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+trading_bot.log
+venv/
+bot_state.json
+bot_state.json.tmp
+pattern_observations.jsonl
+*.log
