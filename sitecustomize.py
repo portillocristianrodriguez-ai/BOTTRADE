@@ -9,6 +9,7 @@ _INSTALLED_BROKER = False
 _INSTALLED_STRATEGY = False
 _ORIGINAL_IMPORT = builtins.__import__
 _PORTFOLIO = {"bucket": None, "items": []}
+_SIGNAL_SCORES = {}
 
 
 def _client_id(order_data):
@@ -56,7 +57,7 @@ def _install_broker(broker_module):
     _disable_secondary_account(broker_module)
 
     def dynamic_size(ticker, precio, atr):
-        """Ajusta el tamaño por volatilidad sin saltarse los límites de riesgo."""
+        """Ajusta el tamaño por volatilidad y calidad de señal sin saltarse límites."""
         qty = size_original(ticker, precio, atr)
         try:
             import config
@@ -81,8 +82,15 @@ def _install_broker(broker_module):
             objetivo = max(0.0001, objetivo)
 
             # Menor ATR relativo => algo más de tamaño; mayor ATR => menos.
-            factor = objetivo / atr_pct
-            factor = min(maximo, max(minimo, factor))
+            vol_factor = objetivo / atr_pct
+            vol_factor = min(maximo, max(minimo, vol_factor))
+
+            # La señal manda dentro de un rango pequeño: calidad baja reduce
+            # exposición; señal excelente permite usar algo más del presupuesto.
+            score = float(_SIGNAL_SCORES.get(str(ticker).upper(), 70.0))
+            score_factor = 0.75 + 0.40 * min(1.0, max(0.0, (score - 70.0) / 30.0))
+            factor = min(maximo, max(minimo, vol_factor * score_factor))
+
             ajustada = float(qty) * factor
 
             if broker_module.es_cripto(ticker):
@@ -96,6 +104,7 @@ def _install_broker(broker_module):
             if abs(factor - 1.0) >= 0.02:
                 broker_module.log.info(
                     f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} "
+                    f"score={score:.1f} vol_factor={vol_factor:.3f} "
                     f"factor={factor:.3f} qty={qty}->{ajustada}"
                 )
             return ajustada
@@ -208,6 +217,7 @@ def _install_strategy(strategy_module):
             result["raw_score"] = raw
             result["portfolio_score"] = portfolio_score
             result["correlation_penalty"] = penalty
+            _SIGNAL_SCORES[current_ticker] = portfolio_score
             if result.get("comprar", False):
                 result["score"] = portfolio_score
                 _PORTFOLIO["items"].append({"ticker": current_ticker, "df": df, "score": raw})
