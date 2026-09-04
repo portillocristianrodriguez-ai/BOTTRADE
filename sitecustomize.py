@@ -99,6 +99,7 @@ def _install_broker(broker_module):
         try:
             import config
             import execution_guard
+            import execution_quality
             from alpaca.trading.enums import QueryOrderStatus
             from alpaca.trading.requests import GetOrdersRequest
             account = client.get_account()
@@ -116,6 +117,31 @@ def _install_broker(broker_module):
                 if cap > 0 and proposed > cap + 0.01:
                     broker_module.log.critical(f"[GUARDIA] {ticker}: supera cap interno crypto")
                     return False
+                if bool(getattr(config, "CRYPTO_EXECUTION_QUALITY_ENABLED", True)):
+                    quality = execution_quality.evaluate_crypto_orderbook(
+                        getattr(broker_module, "cliente_datos_crypto", None),
+                        broker_module.normalizar_ticker_crypto(ticker),
+                        proposed_notional=proposed,
+                        max_spread_pct=float(getattr(config, "CRYPTO_MAX_SPREAD_PCT", 0.90)),
+                        min_top_depth_usd=float(getattr(config, "CRYPTO_MIN_TOP_BOOK_NOTIONAL_USD", 1500.0)),
+                        max_depth_ratio=float(getattr(config, "CRYPTO_MAX_TOP_BOOK_ORDER_RATIO", 0.60)),
+                    )
+                    broker_module.log.info(
+                        f"[EXEC] {ticker}: spread={quality.get('spread_pct')}% "
+                        f"top_depth=${quality.get('top_ask_depth_usd')} "
+                        f"ratio={quality.get('depth_ratio')} impact={quality.get('estimated_impact_pct')} "
+                        f"reason={quality.get('reason')}"
+                    )
+                    if not quality.get("ok", True):
+                        broker_module.log.warning(f"[EXEC] {ticker}: entrada bloqueada por calidad de ejecución")
+                        return False
+                    recommended = float(quality.get("recommended_notional", proposed) or proposed)
+                    if recommended < proposed * 0.98:
+                        broker_module.log.warning(
+                            f"[EXEC] {ticker}: profundidad insuficiente para tamaño completo; "
+                            f"propuesto=${proposed:.2f}, recomendado=${recommended:.2f}"
+                        )
+                        return False
             positions = client.get_all_positions()
             open_orders = client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True))
             if broker_module.tiene_posicion_abierta(ticker) or broker_module.obtener_ordenes_ticker(ticker):
