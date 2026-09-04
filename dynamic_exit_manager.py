@@ -1,9 +1,4 @@
-"""Integración del motor de salidas adaptativas con la protección crypto.
-
-No sustituye los stops duros existentes: actúa antes de la gestión legacy y
-solo reduce/sale cuando hay confirmación suficiente. Las salidas parciales
-usan la misma cuenta Alpaca y el mismo mecanismo de idempotencia.
-"""
+"""Integración del motor de salidas adaptativas con la protección crypto."""
 from __future__ import annotations
 
 import math
@@ -27,7 +22,7 @@ def _num(value, default=0.0):
 
 
 def _partial_sell(broker, ticker, fraction):
-    """Vende una fracción de la posición sin tocar la protección de acciones."""
+    """Vende parcialmente una posición crypto sin competir con otra SELL."""
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
 
@@ -38,7 +33,6 @@ def _partial_sell(broker, ticker, fraction):
     if qty <= 0:
         return None
 
-    # Nunca competir con otra salida SELL abierta.
     for order in broker.obtener_ordenes_ticker(ticker):
         side = str(getattr(order, "side", "")).lower()
         status = str(getattr(order, "status", "")).lower()
@@ -53,38 +47,37 @@ def _partial_sell(broker, ticker, fraction):
     if sell_qty <= 0:
         return None
 
-    symbol = broker.normalizar_ticker_crypto(ticker)
     order = MarketOrderRequest(
-        symbol=symbol,
+        symbol=broker.normalizar_ticker_crypto(ticker),
         qty=sell_qty,
         side=OrderSide.SELL,
         time_in_force=TimeInForce.GTC,
     )
-    submit = broker.cliente_trading.submit_order
     import execution_idempotency
-    result = execution_idempotency.submit_order_idempotente(
+    return execution_idempotency.submit_order_idempotente(
         broker.cliente_trading,
         order,
-        submit_callable=submit,
+        submit_callable=broker.cliente_trading.submit_order,
     )
-    return result
 
 
-def _evaluar_ticker(broker, ticker):
+def _obtener_contexto(broker, ticker, position):
     try:
         datos = broker.obtener_datos_crypto_lote([ticker], dias=3)
-        df = datos.get(ticker) or datos.get(str(ticker).replace("/", ""))
+        df = datos.get(ticker)
+        if df is None:
+            df = datos.get(str(ticker).replace("/", ""))
         if df is None or getattr(df, "empty", True):
             return None
-        ind = estrategia.calcular_indicadores(df)
-        row = ind.iloc[-1]
+        indicadores = estrategia.calcular_indicadores(df)
+        row = indicadores.iloc[-1]
         precio = _num(row.get("close"))
         atr = abs(_num(row.get("atr")))
         if precio <= 0 or atr <= 0:
             return None
         analysis = estrategia.analizar_impulso_crypto(df, ticker)
         return {
-            "pnl_pct": _num(getattr(broker.obtener_posicion(ticker), "unrealized_plpc", 0)),
+            "pnl_pct": _num(getattr(position, "unrealized_plpc", 0)),
             "atr_pct": atr / precio,
             "momentum_pct": _num(analysis.get("momentum_pct", 0)),
             "rsi": _num(analysis.get("rsi", row.get("rsi", 50)), 50),
@@ -100,7 +93,6 @@ def _gestionar_previamente(main_module):
     broker = getattr(main_module, "broker", None)
     if broker is None:
         return
-
     try:
         posiciones = broker.obtener_todas_las_posiciones()
     except Exception:
@@ -112,11 +104,14 @@ def _gestionar_previamente(main_module):
         if not ticker or not broker.es_cripto(ticker):
             continue
         ticker = broker.normalizar_ticker_crypto(ticker)
-        ctx = _evaluar_ticker(broker, ticker)
+        ctx = _obtener_contexto(broker, ticker, position)
         if not ctx:
             continue
 
-        decision = evaluar_salida(**ctx, trailing_stop_pct=float(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015)))
+        decision = evaluar_salida(
+            **ctx,
+            trailing_stop_pct=_num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015),
+        )
         action = decision.get("action", "hold")
         if action == "hold":
             continue
@@ -131,37 +126,29 @@ def _gestionar_previamente(main_module):
         if log:
             log.info(
                 "[DYNAMIC-EXIT] %s action=%s pnl=%.2f%% mom=%.2f%% score=%.1f reasons=%s",
-                ticker,
-                action,
-                ctx["pnl_pct"] * 100.0,
-                ctx["momentum_pct"],
-                _num(decision.get("score")),
-                ",".join(decision.get("reasons", [])),
+                ticker, action, ctx["pnl_pct"] * 100.0, ctx["momentum_pct"],
+                _num(decision.get("score")), ",".join(decision.get("reasons", [])),
             )
 
         try:
-            with getattr(main_module, "_lock_operaciones", _LOCK):
+            lock = getattr(main_module, "_lock_operaciones", _LOCK)
+            with lock:
                 if action == "reduce":
-                    order = _partial_sell(
-                        broker,
-                        ticker,
-                        decision.get("reduce_fraction", 0.50),
-                    )
+                    order = _partial_sell(broker, ticker, decision.get("reduce_fraction", 0.50))
                     if order is not None and log:
                         log.warning("[DYNAMIC-EXIT] %s reducción parcial enviada", ticker)
                 elif action == "exit":
-                    # La salida completa reutiliza la función central, con sus guards.
                     broker.vender(ticker)
                 elif action == "tighten" and log:
-                    stop = decision.get("recommended_stop_pct")
-                    log.info("[DYNAMIC-EXIT] %s trailing recomendado=%.3f%%", ticker, _num(stop) * 100.0)
+                    stop = _num(decision.get("recommended_stop_pct"))
+                    log.info("[DYNAMIC-EXIT] %s trailing recomendado=%.3f%%", ticker, stop * 100.0)
         except Exception as exc:
             if log:
                 log.warning("[DYNAMIC-EXIT] %s acción %s omitida: %s", ticker, action, exc)
 
 
 def instalar(main_module):
-    """Envuelve la gestión crypto existente sin modificar sus stops duros."""
+    """Conecta el motor antes de la gestión legacy de protección."""
     original = getattr(main_module, "gestionar_posiciones_crypto", None)
     if not callable(original) or getattr(original, "_dynamic_exit_installed", False):
         return False
