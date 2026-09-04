@@ -32,6 +32,11 @@ def calcular_indicadores(df):
     df["volumen_ratio"] = pd.to_numeric(
         df["volume"] / df["volumen_media"].replace(0, pd.NA), errors="coerce"
     )
+    df["volumen_media_corta"] = df["volume"].shift(1).rolling(3, min_periods=3).mean()
+    df["aceleracion_volumen"] = pd.to_numeric(
+        df["volume"] / df["volumen_media_corta"].replace(0, pd.NA), errors="coerce"
+    )
+    df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
     df["volumen_valido"] = df["volume"] > 0
     return df
 
@@ -89,8 +94,6 @@ def _generar_senal_acciones(df):
     impulso = (float(actual["close"]) - float(datos.iloc[-4]["close"])) / float(datos.iloc[-4]["close"]) if len(datos) >= 4 and float(datos.iloc[-4]["close"]) > 0 else 0.0
     ruptura = float(actual["close"]) > float(datos.iloc[-13:-1]["high"].max()) if len(datos) >= 13 else False
 
-    # Dos setups: continuación y ruptura. Esto aumenta frecuencia sin eliminar
-    # las condiciones estructurales de tendencia/volatilidad.
     continuacion = (
         tendencia_alcista and emas_alcistas and macd_alcista
         and rsi_ok and volumen_ok and volatilidad_ok
@@ -131,6 +134,8 @@ def _resultado_vacio():
         "atr_pct": 0.0,
         "breakout": False,
         "regimen": "neutral",
+        "adx": 0.0,
+        "aceleracion_volumen": 0.0,
     }
 
 
@@ -158,7 +163,7 @@ def _analizar_impulso(df, ticker, es_crypto=False):
         anterior = datos.iloc[i - 1]
         cols = [
             "close", "high", "ema_tendencia", "ema_rapida", "ema_lenta",
-            "rsi", "macd_hist", "atr", "volumen_ratio"
+            "rsi", "macd_hist", "atr", "volumen_ratio", "adx",
         ]
         if not _datos_validos(actual, cols):
             return resultado
@@ -170,6 +175,8 @@ def _analizar_impulso(df, ticker, es_crypto=False):
 
         rsi = float(actual["rsi"])
         vol = float(actual["volumen_ratio"])
+        aceleracion_vol = float(actual["aceleracion_volumen"]) if not pd.isna(actual["aceleracion_volumen"]) else 0.0
+        adx = float(actual["adx"]) if not pd.isna(actual["adx"]) else 0.0
         atr_pct = float(actual["atr"] / precio * 100)
         momentum = float((precio - previo) / previo * 100)
         max_previo = float(datos.iloc[i - lookback:i]["high"].max())
@@ -209,9 +216,9 @@ def _analizar_impulso(df, ticker, es_crypto=False):
         no_ext = momentum <= max_rise
         macd_ok = hist > 0
         macd_crec = hist >= hist_prev
+        adx_ok = adx >= 18.0
+        aceleracion_ok = aceleracion_vol >= 1.0
 
-        # Régimen simple: tendencia + pendiente de EMA. Se usa como factor
-        # de calidad, no como única condición, para no perder oportunidades.
         if sobre_tendencia and emas and slope_ok:
             regimen = "alcista"
         elif sobre_tendencia or slope_ok:
@@ -226,7 +233,7 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             (emas, 15, "EMA rápida > EMA lenta"),
             (slope_ok, 10, "pendiente positiva"),
             (breakout, 15, "breakout"),
-            (vol_ok, 15, "volumen fuerte"),
+            (vol_ok, 10, "volumen fuerte"),
             (rsi_ok, 10, "RSI saludable"),
             (macd_ok, 5, "MACD positivo"),
             (macd_crec, 5, "MACD creciente"),
@@ -237,6 +244,15 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             if ok:
                 score += puntos
                 motivos.append(motivo)
+
+        # ADX y aceleración no dominan el score: sirven para distinguir una
+        # tendencia realmente negociable de una subida débil o sin participación.
+        if adx_ok:
+            score += 2.5
+            motivos.append("ADX con tendencia")
+        if aceleracion_ok:
+            score += 2.5
+            motivos.append("volumen acelerando")
 
         if not sobre_tendencia:
             motivos.append("debajo EMA tendencia")
@@ -256,28 +272,32 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             motivos.append("movimiento demasiado extendido")
         if not macd_ok:
             motivos.append("MACD negativo")
+        if not adx_ok:
+            motivos.append("ADX débil")
 
-        # Breakout o continuación: cualquiera de los dos puede activar una
-        # entrada. Se mantienen filtros duros contra tendencia bajista y
-        # movimientos ya demasiado extendidos.
-        setup_valido = (
-            (breakout and momentum >= mom_min)
-            or (sobre_tendencia and emas and slope_ok and momentum >= mom_min)
-            or (macd_crec and sobre_tendencia and emas and rsi_ok and momentum > 0)
+        # Dos familias de entrada:
+        # 1) continuación: exige estructura + participación;
+        # 2) breakout: permite entrar con algo menos de pendiente/volumen si
+        #    el propio rompimiento aporta la confirmación de flujo.
+        continuacion = (
+            sobre_tendencia and emas and slope_ok
+            and macd_ok and rsi_ok and mom_ok and atr_ok
+            and vol_ok and no_ext
+        )
+        breakout_fuerte = (
+            breakout and sobre_tendencia and emas
+            and macd_ok and rsi_ok and mom_ok and atr_ok
+            and no_ext and (vol_ok or aceleracion_ok)
+        )
+        cruce_impulso = (
+            sobre_tendencia and emas and macd_ok and rsi_ok
+            and mom_ok and atr_ok and no_ext
+            and macd_crec and (vol_ok or aceleracion_ok)
         )
 
         comprar = bool(
             score >= score_min
-            and setup_valido
-            and sobre_tendencia
-            and emas
-            and slope_ok
-            and vol_ok
-            and rsi_ok
-            and mom_ok
-            and atr_ok
-            and no_ext
-            and macd_ok
+            and (continuacion or breakout_fuerte or cruce_impulso)
         )
 
         return {
@@ -290,6 +310,8 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             "atr_pct": atr_pct,
             "breakout": bool(breakout),
             "regimen": regimen,
+            "adx": adx,
+            "aceleracion_volumen": aceleracion_vol,
         }
     except Exception as e:
         print(f"[{ 'crypto' if es_crypto else 'acciones' } scanner] {ticker}: error analizando impulso: {e}")
