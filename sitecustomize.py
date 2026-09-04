@@ -9,7 +9,6 @@ _INSTALLED_BROKER = False
 _INSTALLED_STRATEGY = False
 _ORIGINAL_IMPORT = builtins.__import__
 _PORTFOLIO = {"bucket": None, "items": []}
-_SIGNAL_SCORES = {}
 
 
 def _client_id(order_data):
@@ -57,7 +56,7 @@ def _install_broker(broker_module):
     _disable_secondary_account(broker_module)
 
     def dynamic_size(ticker, precio, atr):
-        """Ajusta el tamaño por volatilidad y calidad de señal sin saltarse límites."""
+        """Ajusta el tamaño por volatilidad sin saltarse los límites de riesgo."""
         qty = size_original(ticker, precio, atr)
         try:
             import config
@@ -65,46 +64,27 @@ def _install_broker(broker_module):
             atr = float(atr)
             if qty <= 0 or precio <= 0 or atr <= 0:
                 return qty
-
             atr_pct = atr / precio
             if atr_pct <= 0:
                 return qty
-
-            if broker_module.es_cripto(ticker):
-                objetivo = float(getattr(config, "CRYPTO_TARGET_ATR_PCT", 0.020))
-            else:
-                objetivo = float(getattr(config, "STOCK_TARGET_ATR_PCT", 0.015))
-
+            objetivo = float(getattr(
+                config,
+                "CRYPTO_TARGET_ATR_PCT" if broker_module.es_cripto(ticker) else "STOCK_TARGET_ATR_PCT",
+                0.020 if broker_module.es_cripto(ticker) else 0.015,
+            ))
             minimo = float(getattr(config, "DYNAMIC_RISK_MIN_MULTIPLIER", 0.60))
             maximo = float(getattr(config, "DYNAMIC_RISK_MAX_MULTIPLIER", 1.15))
             minimo = min(1.0, max(0.10, minimo))
             maximo = max(1.0, min(1.50, maximo))
             objetivo = max(0.0001, objetivo)
-
-            # Menor ATR relativo => algo más de tamaño; mayor ATR => menos.
-            vol_factor = objetivo / atr_pct
-            vol_factor = min(maximo, max(minimo, vol_factor))
-
-            # La señal manda dentro de un rango pequeño: calidad baja reduce
-            # exposición; señal excelente permite usar algo más del presupuesto.
-            score = float(_SIGNAL_SCORES.get(str(ticker).upper(), 70.0))
-            score_factor = 0.75 + 0.40 * min(1.0, max(0.0, (score - 70.0) / 30.0))
-            factor = min(maximo, max(minimo, vol_factor * score_factor))
-
+            factor = min(maximo, max(minimo, objetivo / atr_pct))
             ajustada = float(qty) * factor
-
-            if broker_module.es_cripto(ticker):
-                ajustada = round(ajustada, 6)
-            else:
-                ajustada = int(ajustada)
-
+            ajustada = round(ajustada, 6) if broker_module.es_cripto(ticker) else int(ajustada)
             if ajustada <= 0:
                 return 0
-
             if abs(factor - 1.0) >= 0.02:
                 broker_module.log.info(
                     f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} "
-                    f"score={score:.1f} vol_factor={vol_factor:.3f} "
                     f"factor={factor:.3f} qty={qty}->{ajustada}"
                 )
             return ajustada
@@ -186,6 +166,10 @@ def _corr(a, b):
         return 0.0
 
 
+def _clamp(value, low, high):
+    return min(high, max(low, value))
+
+
 def _install_strategy(strategy_module):
     global _INSTALLED_STRATEGY
     if _INSTALLED_STRATEGY:
@@ -203,26 +187,55 @@ def _install_strategy(strategy_module):
             if _PORTFOLIO["bucket"] != bucket:
                 _PORTFOLIO["bucket"] = bucket
                 _PORTFOLIO["items"] = []
-            raw = float(result.get("score", 0) or 0)
-            penalty = 0.0
+
+            raw = _clamp(float(result.get("score", 0) or 0), 0.0, 100.0)
+            momentum = max(0.0, float(result.get("momentum_pct", 0) or 0))
+            volume_ratio = max(0.0, float(result.get("volumen_ratio", 1) or 1))
+            atr_pct = max(0.0, float(result.get("atr_pct", 0) or 0))
+            breakout = bool(result.get("breakout", False))
+
+            # Calidad de oportunidad: premia impulso/volumen real y breakout,
+            # pero evita que una volatilidad extrema domine el ranking.
+            quality_bonus = _clamp(momentum, 0.0, 4.0) * 1.25
+            quality_bonus += _clamp(volume_ratio - 1.0, 0.0, 3.0) * 1.0
+            quality_bonus += 2.5 if breakout else 0.0
+            volatility_penalty = max(0.0, atr_pct - 0.06) * 35.0
+
+            correlation_penalty = 0.0
             current_ticker = str(ticker).upper()
             for item in _PORTFOLIO["items"]:
                 if item["ticker"] == current_ticker:
                     continue
                 corr = abs(_corr(df, item["df"]))
-                weight = min(1.0, max(0.0, item["score"] / 100.0))
-                penalty = max(penalty, 8.0 * corr * weight)
-            portfolio_score = max(0.0, min(100.0, raw - penalty))
+                weight = _clamp(item["score"] / 100.0, 0.0, 1.0)
+                # Penalización acumulativa: evita llenar la cartera con clones.
+                correlation_penalty += 10.0 * corr * weight
+
+            correlation_penalty = _clamp(correlation_penalty, 0.0, 20.0)
+            portfolio_score = _clamp(
+                raw + quality_bonus - volatility_penalty - correlation_penalty,
+                0.0,
+                100.0,
+            )
+
             result = dict(result)
             result["raw_score"] = raw
+            result["quality_bonus"] = quality_bonus
+            result["volatility_penalty"] = volatility_penalty
             result["portfolio_score"] = portfolio_score
-            result["correlation_penalty"] = penalty
-            _SIGNAL_SCORES[current_ticker] = portfolio_score
+            result["correlation_penalty"] = correlation_penalty
+
             if result.get("comprar", False):
                 result["score"] = portfolio_score
-                _PORTFOLIO["items"].append({"ticker": current_ticker, "df": df, "score": raw})
+                _PORTFOLIO["items"].append({
+                    "ticker": current_ticker,
+                    "df": df,
+                    "score": portfolio_score,
+                })
                 _PORTFOLIO["items"] = sorted(
-                    _PORTFOLIO["items"], key=lambda x: x["score"], reverse=True
+                    _PORTFOLIO["items"],
+                    key=lambda x: x["score"],
+                    reverse=True,
                 )[:12]
             return result
         except Exception:
