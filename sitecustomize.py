@@ -1,14 +1,8 @@
-"""Scoped runtime hardening for BOTTRADE's broker layer.
+"""Hardening de ejecución de BOTTRADE.
 
-The guard is deliberately scoped to BOTTRADE's own ``broker`` module. It does
-not patch the Alpaca SDK globally. It adds two final protections around the
-existing broker implementation:
-
-1. enforce portfolio exposure / buying-power limits immediately before submit;
-2. attach a deterministic client_order_id to the outgoing Alpaca order so two
-   BOTTRADE processes racing on the same signal converge on the same intent.
-
-The existing broker validation remains the first line of defence.
+Se mantiene deliberadamente acotado al módulo ``broker`` de este proyecto.
+No modifica globalmente el SDK de Alpaca. La capa principal de broker sigue
+siendo la responsable de las validaciones funcionales de las órdenes.
 """
 
 from __future__ import annotations
@@ -22,6 +16,7 @@ _ORIGINAL_IMPORT = builtins.__import__
 
 
 def _client_id(order_data) -> str:
+    """ID determinista corto para evitar dobles envíos de la misma intención."""
     symbol = str(getattr(order_data, "symbol", "ORDER") or "ORDER").upper().replace("/", "")
     side = str(getattr(order_data, "side", "NA") or "NA").upper()
     order_type = str(getattr(order_data, "type", getattr(order_data, "order_type", "market")) or "market").lower()
@@ -29,10 +24,9 @@ def _client_id(order_data) -> str:
     notional = str(getattr(order_data, "notional", "") or "")
     limit_price = str(getattr(order_data, "limit_price", "") or "")
     stop_price = str(getattr(order_data, "stop_price", "") or "")
-    # The scanner runs every few minutes. A short intent window is enough to
-    # collapse duplicate submissions from two live processes without making a
-    # later legitimate signal reuse an old identifier.
-    bucket = int(time.time() // 30)
+    # Cinco minutos: suficientemente corto para el scanner y suficientemente
+    # estable para que dos procesos que detecten la misma señal coincidan.
+    bucket = int(time.time() // 300)
     payload = "|".join((symbol, side, order_type, qty, notional, limit_price, stop_price, str(bucket)))
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
     return f"BT-MOM-{symbol[:12]}-{digest}"
@@ -46,7 +40,6 @@ def _install(broker_module):
     client = getattr(broker_module, "cliente_trading", None)
     original_submit = getattr(client, "submit_order", None) if client is not None else None
     original_validate = getattr(broker_module, "_validar_orden_compra_final", None)
-
     if client is None or not callable(original_submit) or not callable(original_validate):
         return
 
@@ -57,12 +50,13 @@ def _install(broker_module):
         try:
             import config
             import execution_guard
+            from alpaca.trading.enums import QueryOrderStatus
+            from alpaca.trading.requests import GetOrdersRequest
 
             cuenta = client.get_account()
             equity = float(getattr(cuenta, "equity", 0) or 0)
             buying_power = float(getattr(cuenta, "buying_power", 0) or 0)
             proposed = float(cantidad) * float(precio_referencia)
-
             if equity <= 0 or buying_power <= 0 or proposed <= 0:
                 return False
 
@@ -84,8 +78,23 @@ def _install(broker_module):
                     )
                     return False
 
-            positions = broker_module.obtener_todas_las_posiciones()
-            open_orders = broker_module.obtener_ordenes_abiertas()
+            # Usamos únicamente APIs que existen en la capa actual del broker.
+            # Así el guard no puede romper el scanner por depender de helpers
+            # inexistentes.
+            positions = client.get_all_positions()
+            open_filter = GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                limit=500,
+                nested=True,
+            )
+            open_orders = client.get_orders(filter=open_filter)
+
+            # Segunda barrera específica contra duplicados por símbolo.
+            if broker_module.tiene_posicion_abierta(ticker):
+                return False
+            if broker_module.obtener_ordenes_ticker(ticker):
+                return False
+
             ok, reason = execution_guard.validar_exposicion_compra(
                 equity=equity,
                 proposed_notional=proposed,
@@ -101,15 +110,14 @@ def _install(broker_module):
                 return False
 
             broker_module.log.info(
-                f"[GUARDIA] {ticker}: exposición y buying power OK | "
-                f"Notional=${proposed:,.2f}"
+                f"[GUARDIA] {ticker}: riesgo final OK | Notional=${proposed:,.2f}"
             )
             return True
         except Exception as exc:
-            # Fail closed: this guard exists immediately before order submission.
+            # Fail closed: un fallo en la comprobación final nunca debe abrir
+            # una operación que no ha podido validarse.
             broker_module.log.critical(
-                f"[GUARDIA] {ticker}: no se pudo validar riesgo final. "
-                f"ORDEN BLOQUEADA: {exc}"
+                f"[GUARDIA] {ticker}: validación final fallida. ORDEN BLOQUEADA: {exc}"
             )
             return False
 
@@ -119,22 +127,12 @@ def _install(broker_module):
             try:
                 order_data.client_order_id = cid
             except Exception:
-                try:
-                    dumped = order_data.model_dump()
-                    dumped["client_order_id"] = cid
-                    order_data = type(order_data)(**dumped)
-                except Exception as exc:
-                    broker_module.log.critical(
-                        f"[GUARDIA] No se pudo asignar client_order_id: {exc}. "
-                        "ORDEN BLOQUEADA."
-                    )
-                    raise
-
+                dumped = order_data.model_dump()
+                dumped["client_order_id"] = cid
+                order_data = type(order_data)(**dumped)
             broker_module.log.info(
-                f"[GUARDIA] client_order_id={cid} | "
-                f"symbol={getattr(order_data, 'symbol', '?')}"
+                f"[GUARDIA] client_order_id={cid} | symbol={getattr(order_data, 'symbol', '?')}"
             )
-
         return original_submit(order_data=order_data, *args, **kwargs)
 
     broker_module._validar_orden_compra_final = validar_con_riesgo_final
@@ -148,8 +146,8 @@ def _import(name, globals=None, locals=None, fromlist=(), level=0):
         try:
             _install(module)
         except Exception:
-            # Do not prevent the process from starting because of the optional
-            # runtime hook; broker.py still owns the primary safety checks.
+            # La aplicación puede arrancar con las defensas nativas del broker
+            # aunque el hook opcional no pueda instalarse.
             pass
     return module
 
