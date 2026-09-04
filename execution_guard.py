@@ -39,7 +39,6 @@ def _float(value, default: float = 0.0) -> float:
 
 
 def posicion_notional(position) -> float:
-    """Obtiene el valor de mercado de una posición Alpaca de forma defensiva."""
     market_value = _float(getattr(position, "market_value", 0))
     if market_value > 0:
         return market_value
@@ -49,23 +48,13 @@ def posicion_notional(position) -> float:
 
 
 def orden_buy_notional(order, unknown_as: float = float("inf")) -> float:
-    """Estima capital reservado por una BUY abierta.
-
-    Una market BUY enviada por qty puede no exponer ``notional`` ni
-    ``limit_price``. En ese caso no fingimos que su exposición es cero:
-    devolvemos infinito para que el guardia falle cerrado hasta que esa orden
-    deje de estar abierta. Esto evita sobrepasar el límite de exposición por
-    subcontabilizar órdenes pendientes.
-    """
     notional = _float(getattr(order, "notional", 0))
     if notional > 0:
         return notional
-
     qty = abs(_float(getattr(order, "qty", 0)))
     price = _float(getattr(order, "limit_price", 0))
     if qty > 0 and price > 0:
         return qty * price
-
     return unknown_as if qty > 0 else 0.0
 
 
@@ -82,16 +71,15 @@ def compras_abiertas_notional(orders: Iterable) -> float:
     return total
 
 
-def validar_exposicion_compra(
-    *,
-    equity: float,
-    proposed_notional: float,
-    positions: Iterable,
-    open_orders: Iterable,
-    max_single_position_pct: float,
-    max_total_exposure_pct: float,
-) -> tuple[bool, str]:
-    """Aplica límites sobre exposición existente + órdenes BUY pendientes."""
+def validar_exposicion_compra(*, equity: float, proposed_notional: float, positions: Iterable,
+                              open_orders: Iterable, max_single_position_pct: float,
+                              max_total_exposure_pct: float) -> tuple[bool, str]:
+    """Aplica límites sobre exposición existente + órdenes BUY pendientes.
+
+    El límite total es estricto: alcanzar exactamente el máximo no abre una
+    nueva operación. Así queda margen operativo frente a redondeos y cambios
+    de valoración entre la comprobación y el envío.
+    """
     equity = _float(equity)
     proposed_notional = _float(proposed_notional)
     if equity <= 0 or proposed_notional <= 0:
@@ -108,16 +96,15 @@ def validar_exposicion_compra(
         return False, "existe una BUY abierta cuyo notional no se puede determinar de forma segura"
 
     total_after = existing + pending + proposed_notional
-    if total_after > max_total + 0.01:
+    if total_after >= max_total:
         return False, (
-            f"exposición futura ${total_after:,.2f} > máximo total ${max_total:,.2f} "
+            f"exposición futura ${total_after:,.2f} >= máximo total ${max_total:,.2f} "
             f"(actual=${existing:,.2f}, pendientes=${pending:,.2f})"
         )
     return True, "OK"
 
 
 def backoff_seconds(attempt: int, base: float = 0.5, maximum: float = 4.0) -> float:
-    """Backoff pequeño para consultas de confirmación, nunca para reemitir órdenes."""
     attempt = max(0, int(attempt))
     return min(maximum, base * (2 ** attempt))
 
