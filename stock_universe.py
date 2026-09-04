@@ -2,10 +2,6 @@
 
 Esta capa SOLO actualiza los símbolos observados/escaneados. No genera
 señales, no modifica órdenes y no toca la gestión de posiciones.
-
-El universo incluye todas las acciones estadounidenses activas y negociables
-que devuelve Alpaca. La estrategia sigue siendo la responsable de filtrar
-oportunidades.
 """
 from __future__ import annotations
 
@@ -21,6 +17,7 @@ _REFRESH_THREAD_STARTED = False
 
 
 def _text(value):
+    value = getattr(value, "value", value)
     return str(value or "").strip().upper()
 
 
@@ -50,16 +47,13 @@ def _es_accion_us_tradable(asset):
 
 
 def obtener_universo(broker_module, config_module):
-    """Devuelve TODAS las acciones US activas/tradables disponibles en Alpaca."""
+    """Devuelve todas las acciones US activas/tradables disponibles en Alpaca."""
     global _CACHE, _UPDATED
-
     manuales = _manuales(config_module)
     if not bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True)):
         return manuales
-
     now = datetime.now(timezone.utc)
     refresh = max(1, int(getattr(config_module, "STOCK_UNIVERSE_REFRESH_MINUTES", 60)))
-
     with _LOCK:
         if _CACHE and _UPDATED and now - _UPDATED < timedelta(minutes=refresh):
             discovered = list(_CACHE)
@@ -71,13 +65,16 @@ def obtener_universo(broker_module, config_module):
                     for asset in assets
                     if _es_accion_us_tradable(asset)
                 })
-                _CACHE = list(discovered)
-                _UPDATED = now
-                log.info("[acciones] Universo completo actualizado: %s acciones negociables", len(discovered))
+                if discovered:
+                    _CACHE = list(discovered)
+                    _UPDATED = now
+                    log.info("[acciones] Universo completo actualizado: %s acciones negociables", len(discovered))
+                else:
+                    discovered = list(_CACHE)
+                    log.warning("[acciones] Alpaca devolvió 0 acciones filtradas; se conserva el último universo conocido.")
             except Exception as exc:
                 log.warning("[acciones] No se pudo actualizar universo: %s", exc)
                 discovered = list(_CACHE)
-
     ordered = []
     for ticker in manuales + discovered:
         if ticker and ticker not in ordered:
@@ -105,15 +102,9 @@ def instalar(config_module, broker_module):
         if universo:
             config_module.TICKERS = universo
             log.info("[acciones] Monitor ampliado a %s símbolos", len(universo))
-
         if not _REFRESH_THREAD_STARTED and bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True)):
             _REFRESH_THREAD_STARTED = True
-            thread = threading.Thread(
-                target=_refrescar_loop,
-                args=(config_module, broker_module),
-                name="stock-universe-refresh",
-                daemon=True,
-            )
+            thread = threading.Thread(target=_refrescar_loop, args=(config_module, broker_module), name="stock-universe-refresh", daemon=True)
             thread.start()
     except Exception as exc:
         log.warning("[acciones] Universo automático omitido: %s", exc)
