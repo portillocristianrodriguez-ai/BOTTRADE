@@ -9,7 +9,6 @@ def instalar(main_module):
     if getattr(main_module, "_bottrade_safety_hardening", False):
         return
     main_module._bottrade_safety_hardening = True
-
     original_error = getattr(main_module, "registrar_error_operativo", None)
     if callable(original_error):
         def registrar_error_filtrado(origen, error):
@@ -18,7 +17,6 @@ def instalar(main_module):
                 return
             return original_error(origen, error)
         main_module.registrar_error_operativo = registrar_error_filtrado
-
     original_callback = getattr(main_module, "procesar_comando_telegram", None)
     if callable(original_callback):
         def callback_con_universos(comando):
@@ -28,9 +26,10 @@ def instalar(main_module):
                 return _resumen_acciones(main_module)
             if comando == "/crypto":
                 return _resumen_crypto(main_module)
+            if comando in ("/help", "/start"):
+                return original_callback(comando) + "\n\n🌐 UNIVERSOS\n/universo — acciones + crypto\n/acciones — universo completo de acciones\n/crypto — universo completo de crypto"
             return original_callback(comando)
         main_module.procesar_comando_telegram = callback_con_universos
-
     threading.Thread(target=_watchdog_proteccion_universal, args=(main_module,), daemon=True, name="WatchdogProteccionUniversal").start()
     main_module.log.info("[protección] Watchdog universal activo: todas las posiciones de acciones se verifican automáticamente.")
 
@@ -39,8 +38,7 @@ def _resumen_acciones(main_module):
     try:
         import stock_universe
         universo = stock_universe.obtener_universo(main_module.broker, main_module.config)
-        return (f"📈 UNIVERSO ACCIONES\n━━━━━━━━━━━━━━━━━━\n"
-                f"Total negociables: {len(universo):,}\n\n"
+        return (f"📈 UNIVERSO ACCIONES\n━━━━━━━━━━━━━━━━━━\nTotal negociables: {len(universo):,}\n\n"
                 f"Muestra (alfabético): {', '.join(universo[:80])}\n\n"
                 f"Actualización: cada {main_module.config.STOCK_UNIVERSE_REFRESH_MINUTES} min")
     except Exception as exc:
@@ -57,9 +55,7 @@ def _resumen_crypto(main_module):
             tradable = bool(getattr(activo, "tradable", False))
             status = str(getattr(getattr(activo, "status", ""), "value", getattr(activo, "status", ""))).lower()
             clase = str(getattr(getattr(activo, "asset_class", ""), "value", getattr(activo, "asset_class", ""))).lower()
-            if not tradable or (status and "active" not in status):
-                continue
-            if "/" not in simbolo or not simbolo.endswith("/USD"):
+            if not tradable or (status and "active" not in status) or "/" not in simbolo or not simbolo.endswith("/USD"):
                 continue
             if clase and "crypto" not in clase:
                 continue
@@ -67,18 +63,14 @@ def _resumen_crypto(main_module):
                 continue
             universo.append(simbolo)
         universo = sorted(set(universo))
-        return (f"₿ UNIVERSO CRYPTO\n━━━━━━━━━━━━━━━━━━\n"
-                f"Total USD negociables: {len(universo):,}\n\n"
-                f"{', '.join(universo)}\n\n"
-                f"Actualización: cada {main_module.config.CRYPTO_UNIVERSE_REFRESH_MINUTES} min")
+        return (f"₿ UNIVERSO CRYPTO\n━━━━━━━━━━━━━━━━━━\nTotal USD negociables: {len(universo):,}\n\n"
+                f"{', '.join(universo)}\n\nActualización: cada {main_module.config.CRYPTO_UNIVERSE_REFRESH_MINUTES} min")
     except Exception as exc:
         return f"❌ No se pudo consultar crypto: {exc}"
 
 
 def _resumen_universos(main_module):
-    acciones = _resumen_acciones(main_module)
-    crypto = _resumen_crypto(main_module)
-    return f"🤖 UNIVERSOS BOTTRADE\n━━━━━━━━━━━━━━━━━━\n\n{acciones}\n\n{crypto}"
+    return f"🤖 UNIVERSOS BOTTRADE\n━━━━━━━━━━━━━━━━━━\n\n{_resumen_acciones(main_module)}\n\n{_resumen_crypto(main_module)}"
 
 
 def _watchdog_proteccion_universal(main_module):
