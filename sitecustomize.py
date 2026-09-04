@@ -68,11 +68,7 @@ def _install_broker(broker_module):
             atr_pct = atr / precio
             if atr_pct <= 0:
                 return qty
-            objetivo = float(getattr(
-                config,
-                "CRYPTO_TARGET_ATR_PCT" if broker_module.es_cripto(ticker) else "STOCK_TARGET_ATR_PCT",
-                0.020 if broker_module.es_cripto(ticker) else 0.015,
-            ))
+            objetivo = float(getattr(config, "CRYPTO_TARGET_ATR_PCT" if broker_module.es_cripto(ticker) else "STOCK_TARGET_ATR_PCT", 0.020 if broker_module.es_cripto(ticker) else 0.015))
             minimo = float(getattr(config, "DYNAMIC_RISK_MIN_MULTIPLIER", 0.60))
             maximo = float(getattr(config, "DYNAMIC_RISK_MAX_MULTIPLIER", 1.15))
             minimo = min(1.0, max(0.10, minimo))
@@ -84,10 +80,7 @@ def _install_broker(broker_module):
             if ajustada <= 0:
                 return 0
             if abs(factor - 1.0) >= 0.02:
-                broker_module.log.info(
-                    f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} "
-                    f"factor={factor:.3f} qty={qty}->{ajustada}"
-                )
+                broker_module.log.info(f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} factor={factor:.3f} qty={qty}->{ajustada}")
             return ajustada
         except Exception as exc:
             broker_module.log.warning(f"[SIZING] {ticker}: sizing dinámico omitido: {exc}")
@@ -118,42 +111,20 @@ def _install_broker(broker_module):
                     broker_module.log.critical(f"[GUARDIA] {ticker}: supera cap interno crypto")
                     return False
                 if bool(getattr(config, "CRYPTO_EXECUTION_QUALITY_ENABLED", True)):
-                    quality = execution_quality.evaluate_crypto_orderbook(
-                        getattr(broker_module, "cliente_datos_crypto", None),
-                        broker_module.normalizar_ticker_crypto(ticker),
-                        proposed_notional=proposed,
-                        max_spread_pct=float(getattr(config, "CRYPTO_MAX_SPREAD_PCT", 0.90)),
-                        min_top_depth_usd=float(getattr(config, "CRYPTO_MIN_TOP_BOOK_NOTIONAL_USD", 1500.0)),
-                        max_depth_ratio=float(getattr(config, "CRYPTO_MAX_TOP_BOOK_ORDER_RATIO", 0.60)),
-                    )
-                    broker_module.log.info(
-                        f"[EXEC] {ticker}: spread={quality.get('spread_pct')}% "
-                        f"top_depth=${quality.get('top_ask_depth_usd')} "
-                        f"ratio={quality.get('depth_ratio')} impact={quality.get('estimated_impact_pct')} "
-                        f"reason={quality.get('reason')}"
-                    )
+                    quality = execution_quality.evaluate_crypto_orderbook(getattr(broker_module, "cliente_datos_crypto", None), broker_module.normalizar_ticker_crypto(ticker), proposed_notional=proposed, max_spread_pct=float(getattr(config, "CRYPTO_MAX_SPREAD_PCT", 0.90)), min_top_depth_usd=float(getattr(config, "CRYPTO_MIN_TOP_BOOK_NOTIONAL_USD", 1500.0)), max_depth_ratio=float(getattr(config, "CRYPTO_MAX_TOP_BOOK_ORDER_RATIO", 0.60)))
+                    broker_module.log.info(f"[EXEC] {ticker}: spread={quality.get('spread_pct')}% top_depth=${quality.get('top_ask_depth_usd')} ratio={quality.get('depth_ratio')} impact={quality.get('estimated_impact_pct')} reason={quality.get('reason')}")
                     if not quality.get("ok", True):
                         broker_module.log.warning(f"[EXEC] {ticker}: entrada bloqueada por calidad de ejecución")
                         return False
                     recommended = float(quality.get("recommended_notional", proposed) or proposed)
                     if recommended < proposed * 0.98:
-                        broker_module.log.warning(
-                            f"[EXEC] {ticker}: profundidad insuficiente para tamaño completo; "
-                            f"propuesto=${proposed:.2f}, recomendado=${recommended:.2f}"
-                        )
+                        broker_module.log.warning(f"[EXEC] {ticker}: profundidad insuficiente para tamaño completo; propuesto=${proposed:.2f}, recomendado=${recommended:.2f}")
                         return False
             positions = client.get_all_positions()
             open_orders = client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True))
             if broker_module.tiene_posicion_abierta(ticker) or broker_module.obtener_ordenes_ticker(ticker):
                 return False
-            ok, reason = execution_guard.validar_exposicion_compra(
-                equity=equity,
-                proposed_notional=proposed,
-                positions=positions,
-                open_orders=open_orders,
-                max_single_position_pct=float(getattr(config, "MAX_SINGLE_POSITION_PCT", 0.20)),
-                max_total_exposure_pct=float(getattr(config, "MAX_TOTAL_EXPOSURE_PCT", 0.50)),
-            )
+            ok, reason = execution_guard.validar_exposicion_compra(equity=equity, proposed_notional=proposed, positions=positions, open_orders=open_orders, max_single_position_pct=float(getattr(config, "MAX_SINGLE_POSITION_PCT", 0.20)), max_total_exposure_pct=float(getattr(config, "MAX_TOTAL_EXPOSURE_PCT", 0.50)))
             if not ok:
                 broker_module.log.critical(f"[GUARDIA] {ticker}: exposición bloqueada: {reason}")
             return ok
@@ -162,16 +133,8 @@ def _install_broker(broker_module):
             return False
 
     def guarded_submit(order_data=None, *args, **kwargs):
-        if order_data is not None and not getattr(order_data, "client_order_id", None):
-            cid = _client_id(order_data)
-            try:
-                order_data.client_order_id = cid
-            except Exception:
-                dumped = order_data.model_dump()
-                dumped["client_order_id"] = cid
-                order_data = type(order_data)(**dumped)
-            broker_module.log.info(f"[GUARDIA] client_order_id={cid}")
-        return submit(order_data=order_data, *args, **kwargs)
+        import execution_idempotency
+        return execution_idempotency.submit_order_idempotente(client, order_data)
 
     broker_module.calcular_tamano_posicion = dynamic_size
     broker_module._validar_orden_compra_final = risk_check
@@ -211,10 +174,7 @@ def _obtener_regimen_global(broker_module):
         regime = market_regime.evaluar_regimen_btc(btc)
         _REGIME_CACHE["ts"] = now
         _REGIME_CACHE["data"] = regime
-        broker_module.log.info(
-            f"[REGIMEN] BTC={regime.get('regimen')} score={regime.get('score', 50):.1f} "
-            f"confidence={regime.get('confidence', 0):.2f}"
-        )
+        broker_module.log.info(f"[REGIMEN] BTC={regime.get('regimen')} score={regime.get('score', 50):.1f} confidence={regime.get('confidence', 0):.2f}")
         return regime
     except Exception as exc:
         broker_module.log.warning(f"[REGIMEN] no disponible; se usa neutral: {exc}")
@@ -238,18 +198,15 @@ def _install_strategy(strategy_module):
             if _PORTFOLIO["bucket"] != bucket:
                 _PORTFOLIO["bucket"] = bucket
                 _PORTFOLIO["items"] = []
-
             raw = _clamp(float(result.get("score", 0) or 0), 0.0, 100.0)
             momentum = max(0.0, float(result.get("momentum_pct", 0) or 0))
             volume_ratio = max(0.0, float(result.get("volumen_ratio", 1) or 1))
             atr_pct = max(0.0, float(result.get("atr_pct", 0) or 0))
             breakout = bool(result.get("breakout", False))
-
             quality_bonus = _clamp(momentum, 0.0, 4.0) * 1.25
-            quality_bonus += _clamp(volume_ratio - 1.0, 0.0, 3.0) * 1.0
+            quality_bonus += _clamp(volume_ratio - 1.0, 0.0, 3.0)
             quality_bonus += 2.5 if breakout else 0.0
             volatility_penalty = max(0.0, atr_pct - 0.06) * 35.0
-
             correlation_penalty = 0.0
             current_ticker = str(ticker).upper()
             for item in _PORTFOLIO["items"]:
@@ -259,25 +216,12 @@ def _install_strategy(strategy_module):
                 weight = _clamp(item["score"] / 100.0, 0.0, 1.0)
                 correlation_penalty += 10.0 * corr * weight
             correlation_penalty = _clamp(correlation_penalty, 0.0, 20.0)
-
             broker_module = __import__("broker")
             regime = _obtener_regimen_global(broker_module)
             regime_name = str(regime.get("regimen", "neutral"))
             regime_score = float(regime.get("score", 50.0) or 50.0)
-            regime_adjustment = {
-                "alcista": 6.0,
-                "transicion_alcista": 2.0,
-                "neutral": 0.0,
-                "transicion_bajista": -6.0,
-                "bajista": -14.0,
-            }.get(regime_name, 0.0)
-
-            portfolio_score = _clamp(
-                raw + quality_bonus - volatility_penalty - correlation_penalty + regime_adjustment,
-                0.0,
-                100.0,
-            )
-
+            regime_adjustment = {"alcista": 6.0, "transicion_alcista": 2.0, "neutral": 0.0, "transicion_bajista": -6.0, "bajista": -14.0}.get(regime_name, 0.0)
+            portfolio_score = _clamp(raw + quality_bonus - volatility_penalty - correlation_penalty + regime_adjustment, 0.0, 100.0)
             result = dict(result)
             result["raw_score"] = raw
             result["quality_bonus"] = quality_bonus
@@ -287,24 +231,14 @@ def _install_strategy(strategy_module):
             result["market_regime"] = regime_name
             result["market_regime_score"] = regime_score
             result["market_regime_adjustment"] = regime_adjustment
-
             hard_block_bear = regime_name == "bajista" and raw < 84.0
             if hard_block_bear:
                 result["comprar"] = False
                 result.setdefault("motivo", []).append("BTC en régimen bajista")
-
             if result.get("comprar", False):
                 result["score"] = portfolio_score
-                _PORTFOLIO["items"].append({
-                    "ticker": current_ticker,
-                    "df": df,
-                    "score": portfolio_score,
-                })
-                _PORTFOLIO["items"] = sorted(
-                    _PORTFOLIO["items"],
-                    key=lambda x: x["score"],
-                    reverse=True,
-                )[:12]
+                _PORTFOLIO["items"].append({"ticker": current_ticker, "df": df, "score": portfolio_score})
+                _PORTFOLIO["items"] = sorted(_PORTFOLIO["items"], key=lambda x: x["score"], reverse=True)[:12]
             else:
                 result["score"] = portfolio_score
             return result
