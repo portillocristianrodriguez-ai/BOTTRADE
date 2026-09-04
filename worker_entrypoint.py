@@ -5,6 +5,7 @@ import main as bot
 import safety_hardening
 import after_hours_hardening
 import data_quality_hardening
+import persistence_hardening
 import telegram_hardening
 import telegram_startup_summary
 import worker
@@ -16,5 +17,6 @@ if __name__ == "__main__":
     safety_hardening.instalar(bot)
     after_hours_hardening.instalar(bot)
     data_quality_hardening.instalar(bot)
+    persistence_hardening.instalar(bot)
     telegram_hardening.instalar(bot)
     worker.main()
