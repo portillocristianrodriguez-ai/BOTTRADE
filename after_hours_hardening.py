@@ -29,7 +29,7 @@ def instalar(main_module):
 
         try:
             import stock_universe
-            tickers = stock_universe.obtener_universo(config, broker)
+            tickers = stock_universe.obtener_universo(broker, config)
         except Exception as exc:
             main_module.log.warning(
                 "[acciones observación] No se pudo obtener el universo dinámico: %s",
