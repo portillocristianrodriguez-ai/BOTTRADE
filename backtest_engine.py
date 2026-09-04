@@ -144,12 +144,22 @@ def run(
     signal_fn = signal_fn or estrategia.generar_senal
     cash = float(initial_cash)
     position = None
+    pending_entry = None
     trades: list[Trade] = []
     equity_rows = []
 
     for i in range(len(data)):
         row = data.iloc[i]
         price = float(row["close"])
+
+        # Una señal de la vela anterior deja una orden pendiente. Solo aquí,
+        # al llegar la vela siguiente, se ejecuta y se descuenta el efectivo.
+        if pending_entry is not None and i == pending_entry["index"]:
+            total = pending_entry["qty"] * pending_entry["entry"] + pending_entry["entry_fee"]
+            if total <= cash:
+                cash -= total
+                position = pending_entry
+            pending_entry = None
 
         if position is not None:
             if price > position["peak"]:
@@ -178,9 +188,9 @@ def run(
                 cash += position["qty"] * exit_price - fees
                 position = None
 
-        # La señal de la vela i solo puede abrir en i+1. La nueva posición no
-        # entra en equity hasta que llegue realmente su vela de entrada.
-        if position is None and i < len(data) - 1:
+        # La señal de la vela i solo puede abrir en i+1. Se programa la
+        # entrada, pero no se reserva cash ni se altera equity en esta vela.
+        if position is None and pending_entry is None and i < len(data) - 1:
             try:
                 sig = signal_fn(data.iloc[: i + 1])
             except Exception:
@@ -194,12 +204,19 @@ def run(
                     fees = qty * next_open * fee_bps / 10000.0
                     total = qty * next_open + fees
                     if total <= cash:
-                        cash -= total
-                        position = {"entry_time": data.index[i + 1], "entry": next_open, "qty": qty, "stop": next_open * (1.0 - sl), "target": next_open * (1.0 + tp), "trail": next_open * (1.0 - trail), "peak": next_open}
+                        pending_entry = {
+                            "index": i + 1,
+                            "entry_time": data.index[i + 1],
+                            "entry": next_open,
+                            "entry_fee": fees,
+                            "qty": qty,
+                            "stop": next_open * (1.0 - sl),
+                            "target": next_open * (1.0 + tp),
+                            "trail": next_open * (1.0 - trail),
+                            "peak": next_open,
+                        }
 
         if position is None:
-            mark = cash
-        elif data.index[i] < position["entry_time"]:
             mark = cash
         else:
             mark = cash + position["qty"] * price
