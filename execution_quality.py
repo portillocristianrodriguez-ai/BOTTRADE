@@ -1,6 +1,6 @@
 """Pre-trade crypto execution-quality checks.
 
-No orders are sent here. The module only evaluates the current bid/ask and
+No orders are sent here. The module evaluates the current bid/ask and
 order-book depth so the execution layer can reject or reduce trades that are
 likely to suffer excessive spread or market impact.
 """
@@ -30,8 +30,10 @@ def _level_price_size(level):
 def evaluate_crypto_orderbook(data_client, symbol: str, proposed_notional: float,
                               max_spread_pct: float = 0.90,
                               min_top_depth_usd: float = 1500.0,
-                              max_depth_ratio: float = 0.60) -> Dict[str, Any]:
-    """Return a fail-safe execution-quality decision for a crypto buy."""
+                              max_depth_ratio: float = 0.60,
+                              min_execution_notional_usd: float = 25.0) -> Dict[str, Any]:
+    """Evaluate a crypto buy and recommend a safe notional when depth is thin."""
+    proposed = max(0.0, _num(proposed_notional))
     result = {
         "ok": True,
         "reason": "disabled_or_unavailable",
@@ -39,7 +41,7 @@ def evaluate_crypto_orderbook(data_client, symbol: str, proposed_notional: float
         "top_ask_depth_usd": None,
         "depth_ratio": None,
         "estimated_impact_pct": None,
-        "recommended_notional": float(proposed_notional),
+        "recommended_notional": proposed,
     }
     try:
         from alpaca.data.requests import CryptoLatestOrderbookRequest
@@ -68,7 +70,7 @@ def evaluate_crypto_orderbook(data_client, symbol: str, proposed_notional: float
         mid = (ask_price + bid_price) / 2.0
         spread_pct = (ask_price - bid_price) / mid * 100.0
         top_depth = ask_price * ask_size
-        proposed = max(0.0, _num(proposed_notional))
+        max_ratio = min(1.0, max(0.05, _num(max_depth_ratio, 0.60)))
         depth_ratio = proposed / top_depth if top_depth > 0 else math.inf
 
         remaining = proposed
@@ -78,7 +80,7 @@ def evaluate_crypto_orderbook(data_client, symbol: str, proposed_notional: float
             price, size = _level_price_size(level)
             if price <= 0 or size <= 0:
                 continue
-            take = min(size, remaining / price) if remaining > 0 else 0
+            take = min(size, remaining / price) if remaining > 0 else 0.0
             if take <= 0:
                 break
             cost += take * price
@@ -107,17 +109,31 @@ def evaluate_crypto_orderbook(data_client, symbol: str, proposed_notional: float
             return result
 
         min_depth = max(0.0, _num(min_top_depth_usd, 1500.0))
-        max_ratio = min(1.0, max(0.05, _num(max_depth_ratio, 0.60)))
+        minimum = max(0.0, _num(min_execution_notional_usd, 25.0))
         if top_depth < min_depth and proposed > top_depth * max_ratio:
+            recommended = top_depth * max_ratio
+            if recommended >= minimum:
+                result["recommended_notional"] = recommended
+                result["reason"] = "reduced_for_thin_book"
+                return result
             result["ok"] = False
             result["reason"] = "thin_top_of_book"
-            result["recommended_notional"] = top_depth * max_ratio
+            result["recommended_notional"] = recommended
             return result
 
         if depth_ratio > max_ratio and top_depth > 0:
-            result["recommended_notional"] = top_depth * max_ratio
+            recommended = top_depth * max_ratio
+            if recommended >= minimum:
+                result["recommended_notional"] = recommended
+                result["reason"] = "reduced_for_depth"
+            else:
+                result["ok"] = False
+                result["reason"] = "insufficient_depth"
+                result["recommended_notional"] = recommended
+                return result
 
-        if impact_pct is not None and impact_pct > max(0.10, _num(max_spread_pct, 0.90) * 1.5):
+        impact_limit = max(0.10, _num(max_spread_pct, 0.90) * 1.5)
+        if impact_pct is not None and impact_pct > impact_limit:
             result["ok"] = False
             result["reason"] = "estimated_impact_too_high"
             return result
