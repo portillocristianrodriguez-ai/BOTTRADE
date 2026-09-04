@@ -1,1 +1,1 @@
-worker: python worker.py
+web: python render_entrypoint.py
