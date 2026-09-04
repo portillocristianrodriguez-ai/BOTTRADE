@@ -23,18 +23,20 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertEqual(stats["trades"], 0)
         self.assertEqual(stats["final_equity"], 100000.0)
         self.assertEqual(len(equity), len(data))
+        self.assertTrue((equity["equity"] == 100000.0).all())
         self.assertEqual(trades, [])
 
-    def test_entry_is_next_bar_open(self):
+    def test_entry_is_next_bar_open_and_not_marked_early(self):
         data = self._data()
 
         def signal(df):
             return "COMPRAR" if len(df) == 210 else "VENDER" if len(df) == 211 else "ESPERAR"
 
-        stats, _, trades = run(data, signal_fn=signal, slippage_bps=0, fee_bps=0)
+        stats, equity, trades = run(data, signal_fn=signal, slippage_bps=0, fee_bps=0)
         self.assertGreaterEqual(stats["trades"], 1)
         self.assertEqual(trades[0].entry_time, data.index[210])
         self.assertEqual(trades[0].entry, float(data.iloc[210]["open"]))
+        self.assertEqual(float(equity.loc[data.index[209], "equity"]), 100000.0)
 
     def test_summary_drawdown_profit_factor_and_risk_metrics(self):
         trades = []
