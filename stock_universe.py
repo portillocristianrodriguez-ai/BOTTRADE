@@ -1,8 +1,4 @@
-"""Descubrimiento completo del universo de acciones negociables de BOTTRADE.
-
-Esta capa SOLO actualiza los símbolos observados/escaneados. No genera
-señales, no modifica órdenes y no toca la gestión de posiciones.
-"""
+"""Descubrimiento completo del universo de acciones negociables de BOTTRADE."""
 from __future__ import annotations
 
 import logging
@@ -49,9 +45,8 @@ def _es_accion_us_tradable(asset):
 def obtener_universo(broker_module, config_module):
     """Devuelve todas las acciones US activas/tradables disponibles en Alpaca."""
     global _CACHE, _UPDATED
-    manuales = _manuales(config_module)
     if not bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True)):
-        return manuales
+        return sorted(set(_manuales(config_module)))
     now = datetime.now(timezone.utc)
     refresh = max(1, int(getattr(config_module, "STOCK_UNIVERSE_REFRESH_MINUTES", 60)))
     with _LOCK:
@@ -75,11 +70,8 @@ def obtener_universo(broker_module, config_module):
             except Exception as exc:
                 log.warning("[acciones] No se pudo actualizar universo: %s", exc)
                 discovered = list(_CACHE)
-    ordered = []
-    for ticker in manuales + discovered:
-        if ticker and ticker not in ordered:
-            ordered.append(ticker)
-    return ordered
+    # Sin prioridad: todo el universo forma un conjunto único y ordenado.
+    return sorted(set(_manuales(config_module) + discovered))
 
 
 def _refrescar_loop(config_module, broker_module):
@@ -108,3 +100,8 @@ def instalar(config_module, broker_module):
             thread.start()
     except Exception as exc:
         log.warning("[acciones] Universo automático omitido: %s", exc)
+
+
+def estado_universo():
+    with _LOCK:
+        return {"acciones": len(_CACHE), "actualizado": _UPDATED, "tickers": list(_CACHE)}
