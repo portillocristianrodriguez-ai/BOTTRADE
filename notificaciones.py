@@ -21,6 +21,9 @@ _comandos_lock = threading.Lock()
 _comandos_iniciado = False
 _lockfile_fd = None
 
+# Telegram limita sendMessage a 4096 caracteres de texto.
+TELEGRAM_MAX_MESSAGE = 4096
+
 
 # ============================================================
 # ENVIAR NOTIFICACIÓN
@@ -41,6 +44,18 @@ def notificar(mensaje: str):
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{mensaje}"
         )
+
+        # Evita HTTP 400 cuando cualquier comando/estado genera más de
+        # 4096 caracteres (por ejemplo, un universo completo de acciones).
+        if len(mensaje_final) > TELEGRAM_MAX_MESSAGE:
+            aviso = "\n\n⚠️ Mensaje truncado por límite de Telegram."
+            limite = TELEGRAM_MAX_MESSAGE - len(aviso)
+            mensaje_final = mensaje_final[:limite] + aviso
+            log.warning(
+                "[Telegram] Mensaje demasiado largo; truncado a %s caracteres.",
+                TELEGRAM_MAX_MESSAGE,
+            )
+
         url = (
             f"https://api.telegram.org/"
             f"bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -86,8 +101,6 @@ def _adquirir_lock_receptor():
     except FileExistsError:
         return False
     except Exception as e:
-        # El lock de fichero es una defensa adicional; si el sistema no lo
-        # permite, el lock de Python sigue evitando duplicados en el proceso.
         log.warning(f"[Telegram] No se pudo crear lock de receptor: {e}")
         return True
 
@@ -198,9 +211,6 @@ def _loop_comandos(callback):
                 conflictos_409 = 0
 
                 if respuesta.status_code == 404:
-                    # Un 404 repetido no se arregla reintentando: normalmente
-                    # indica token inválido/revocado. Detenemos el polling para
-                    # no llenar los logs y no crear un falso estado operativo.
                     log.error(
                         "[Telegram] getUpdates devolvió 404. El token del bot "
                         "no es válido/está revocado. Receptor detenido; "
@@ -257,19 +267,7 @@ def _loop_comandos(callback):
                             f"[Telegram] Error ejecutando {comando}: {e}"
                         )
                         notificar(f"❌ Error ejecutando {comando}.")
-
-            except requests.exceptions.Timeout:
-                continue
-            except requests.exceptions.RequestException as e:
-                log.error(
-                    f"[Telegram] Error de conexión monitorizando comandos: {e}"
-                )
-                time.sleep(5)
-            except Exception as e:
-                log.error(f"[Telegram] Error monitorizando comandos: {e}")
-                time.sleep(5)
     finally:
-        with _comandos_lock:
-            _comandos_iniciado = False
-            _liberar_lock_receptor()
-        log.warning("[Telegram] Receptor de comandos detenido.")
+        global _comandos_iniciado
+        _comandos_iniciado = False
+        _liberar_lock_receptor()
