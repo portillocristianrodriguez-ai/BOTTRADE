@@ -1,8 +1,8 @@
 """Compatibility hardening layer for BOTTRADE.
 
 Applies scoped safeguards to the existing broker/strategy modules until the
-same controls are moved directly into broker.py. It must never enable live
-trading or bypass the broker's own checks.
+same controls are moved directly into broker.py. It never enables live trading
+or sends orders to the secondary account.
 """
 from __future__ import annotations
 
@@ -15,22 +15,6 @@ _INSTALLED_STRATEGY = False
 _ORIGINAL_IMPORT = builtins.__import__
 _PORTFOLIO = {"bucket": None, "items": []}
 _REGIME_CACHE = {"ts": 0.0, "data": None}
-
-
-def _disable_secondary_account(broker_module):
-    if hasattr(broker_module, "cliente_trading_secundaria"):
-        broker_module.cliente_trading_secundaria = None
-
-    def _sin_segunda_cuenta(*args, **kwargs):
-        return None
-
-    def _sin_posiciones_secundarias(*args, **kwargs):
-        return []
-
-    if hasattr(broker_module, "obtener_resumen_cuenta_secundaria"):
-        broker_module.obtener_resumen_cuenta_secundaria = _sin_segunda_cuenta
-    if hasattr(broker_module, "obtener_posiciones_secundaria"):
-        broker_module.obtener_posiciones_secundaria = _sin_posiciones_secundarias
 
 
 def _execution_quality_notional(broker_module, ticker, proposed):
@@ -75,8 +59,6 @@ def _install_broker(broker_module):
     size_original = getattr(broker_module, "calcular_tamano_posicion", None)
     if client is None or not callable(submit) or not callable(validate) or not callable(size_original):
         return
-
-    _disable_secondary_account(broker_module)
 
     def dynamic_size(ticker, precio, atr):
         """Ajusta tamaño por volatilidad y, en crypto, por liquidez real."""
@@ -195,11 +177,7 @@ def _install_broker(broker_module):
         if order_data is None:
             raise ValueError("submit_order requiere order_data")
         import execution_idempotency
-        return execution_idempotency.submit_order_idempotente(
-            client,
-            order_data,
-            submit_callable=submit,
-        )
+        return execution_idempotency.submit_order_idempotente(client, order_data, submit_callable=submit)
 
     broker_module.calcular_tamano_posicion = dynamic_size
     broker_module._validar_orden_compra_final = risk_check
