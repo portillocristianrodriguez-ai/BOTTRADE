@@ -25,6 +25,23 @@ def _client_id(order_data):
     return f"BT-MOM-{symbol[:12]}-{digest}"
 
 
+def _disable_secondary_account(broker_module):
+    """Desactiva cualquier soporte legado de segunda cuenta."""
+    if hasattr(broker_module, "cliente_trading_secundaria"):
+        broker_module.cliente_trading_secundaria = None
+
+    def _sin_segunda_cuenta(*args, **kwargs):
+        return None
+
+    def _sin_posiciones_secundarias(*args, **kwargs):
+        return []
+
+    if hasattr(broker_module, "obtener_resumen_cuenta_secundaria"):
+        broker_module.obtener_resumen_cuenta_secundaria = _sin_segunda_cuenta
+    if hasattr(broker_module, "obtener_posiciones_secundaria"):
+        broker_module.obtener_posiciones_secundaria = _sin_posiciones_secundarias
+
+
 def _install_broker(broker_module):
     global _INSTALLED_BROKER
     if _INSTALLED_BROKER:
@@ -34,6 +51,8 @@ def _install_broker(broker_module):
     validate = getattr(broker_module, "_validar_orden_compra_final", None)
     if client is None or not callable(submit) or not callable(validate):
         return
+
+    _disable_secondary_account(broker_module)
 
     def risk_check(ticker, qty, price):
         if not validate(ticker, qty, price):
@@ -139,9 +158,6 @@ def _install_strategy(strategy_module):
             result["raw_score"] = raw
             result["portfolio_score"] = portfolio_score
             result["correlation_penalty"] = penalty
-            # main.py already ordena y filtra por 'score': hacer que el score
-            # efectivo sea el score diversificado convierte la penalización
-            # de correlación en una decisión real de cartera.
             if result.get("comprar", False):
                 result["score"] = portfolio_score
                 _PORTFOLIO["items"].append({"ticker": current_ticker, "df": df, "score": raw})
