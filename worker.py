@@ -8,6 +8,7 @@ import estrategia
 import crypto_ranker
 import early_signal
 import dynamic_exit_manager_v2 as dynamic_exit_manager
+import stock_universe
 from execution_stream import lanzar_stream_ejecuciones
 
 _PATTERN_CONTEXT = threading.local()
@@ -258,6 +259,12 @@ def main():
     _instalar_ranking_crypto(bot)
     _instalar_sizing_por_score(bot)
     dynamic_exit_manager.instalar(bot)
+
+    # El universo de acciones se instala ANTES de bot.main(), para que
+    # main.py nunca arranque el scanner con los 5 tickers por defecto.
+    # No modifica señales, órdenes, SL/TP, riesgo ni exposición.
+    stock_universe.instalar(bot.config, bot.broker)
+
     lanzar_stream_ejecuciones()
     bot.main()
 
