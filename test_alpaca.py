@@ -1,165 +1,83 @@
-"""Consulta y gestiona las posiciones abiertas en Alpaca."""
-import loggin
+"""Deterministic regression tests for BOTTRADE safety helpers.
 
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
-from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
+These tests do not submit orders and do not require Alpaca credentials.
+Run with: python -m unittest test_alpaca.py
+"""
 
-import config
-import broker
+import unittest
 
-log = logging.getLogger(__name__)
-
-
-def obtener_posiciones():
-    """Devuelve todas las posiciones abiertas."""
-    return broker.trading_client.get_all_positions()
+import execution_guard
+import execution_idempotency
 
 
-def obtener_ordenes_abiertas(ticker: str):
-    """Devuelve las órdenes abiertas de un ticker."""
-    return broker.trading_client.get_orders(
-        status="open",
-        symbols=[ticker],
-    )
+class FakeOrder:
+    def __init__(self, status="new", notional=None, qty=None, limit_price=None, side="buy"):
+        self.status = status
+        self.notional = notional
+        self.qty = qty
+        self.limit_price = limit_price
+        self.side = side
 
 
-def comprobar_proteccion(ticker: str) -> tuple[bool, bool]:
-    """
-    Comprueba si una posición tiene Stop Loss y Take Profit
-    entre sus órdenes abiertas.
-    """
-    ordenes = obtener_ordenes_abiertas(ticker)
+class FakeClient:
+    def __init__(self):
+        self.orders = {}
+        self.submit_calls = 0
 
-    tiene_stop = False
-    tiene_take_profit = False
+    def get_order_by_client_id(self, client_order_id):
+        return self.orders.get(client_order_id)
 
-    for orden in ordenes:
-        tipo = str(orden.order_type).lower()
-
-        if "stop" in tipo:
-            tiene_stop = True
-
-        if "limit" in tipo:
-            tiene_take_profit = True
-
-    return tiene_stop, tiene_take_profit
+    def submit_order(self, order_data=None):
+        self.submit_calls += 1
+        order = FakeOrder(status="new")
+        self.orders[order_data.client_order_id] = order
+        return order
 
 
-def mostrar_posiciones():
-    """Muestra las posiciones actuales de forma clara."""
-
-    posiciones = obtener_posiciones()
-
-    print("\n📊 POSICIONES ACTUALES")
-    print("=" * 35)
-
-    if not posiciones:
-        print("No hay posiciones abiertas.")
-        return
-
-    for posicion in posiciones:
-        ticker = posicion.symbol
-        cantidad = float(posicion.qty)
-        entrada = float(posicion.avg_entry_price)
-        actual = float(posicion.current_price)
-
-        tiene_stop, tiene_tp = comprobar_proteccion(ticker)
-
-        print(f"\n{ticker}")
-        print(f"Cantidad: {cantidad:g}")
-        print(f"Entrada: ${entrada:.2f}")
-        print(f"Actual: ${actual:.2f}")
-        print(f"Stop Loss: {'✅' if tiene_stop else '❌'}")
-        print(f"Take Profit: {'✅' if tiene_tp else '❌'}")
-
-
-def proteger_posicion(ticker: str) -> bool:
-    """
-    Si una posición no tiene protección, crea una orden bracket
-    de protección para la cantidad existente.
-
-    Se utiliza como mecanismo de seguridad para posiciones que
-    hayan quedado abiertas sin SL/TP.
-    """
-
-    try:
-        posicion = broker.trading_client.get_open_position(ticker)
-    except Exception:
-        return False
-
-    cantidad = float(posicion.qty)
-    entrada = float(posicion.avg_entry_price)
-
-    if cantidad <= 0:
-        return False
-
-    tiene_stop, tiene_tp = comprobar_proteccion(ticker)
-
-    if tiene_stop and tiene_tp:
-        return True
-
-    # Si falta alguna protección, cancelamos órdenes abiertas
-    # de ese ticker antes de crear la protección correcta.
-    ordenes = obtener_ordenes_abiertas(ticker)
-
-    for orden in ordenes:
-        try:
-            broker.trading_client.cancel_order_by_id(orden.id)
-        except Exception as e:
-            log.warning(f"{ticker}: no se pudo cancelar orden {orden.id}: {e}")
-
-    stop_loss = round(entrada * (1 - config.STOP_LOSS_PCT), 2)
-    take_profit = round(entrada * (1 + config.TAKE_PROFIT_PCT), 2)
-
-    orden = MarketOrderRequest(
-        symbol=ticker,
-        qty=cantidad,
-        side=OrderSide.SELL,
-        time_in_force=TimeInForce.DAY,
-        order_class=OrderClass.BRACKET,
-        stop_loss=StopLossRequest(stop_price=stop_loss),
-        take_profit=TakeProfitRequest(limit_price=take_profit),
-    )
-
-    try:
-        broker.trading_client.submit_order(orden)
-
-        log.info(
-            f"{ticker}: protección creada "
-            f"(SL ${stop_loss} / TP ${take_profit})."
+class SafetyTests(unittest.TestCase):
+    def test_unknown_pending_market_buy_fails_closed(self):
+        ok, reason = execution_guard.validar_exposicion_compra(
+            equity=10000,
+            proposed_notional=1000,
+            positions=[],
+            open_orders=[FakeOrder(status="new", qty=10, limit_price=None)],
+            max_single_position_pct=0.20,
+            max_total_exposure_pct=0.50,
         )
-        return True
+        self.assertFalse(ok)
+        self.assertIn("notional", reason)
 
-    except Exception as e:
-        log.error(f"{ticker}: error creando protección: {e}")
-        return False
+    def test_pending_limit_buy_counts_toward_exposure(self):
+        ok, _ = execution_guard.validar_exposicion_compra(
+            equity=10000,
+            proposed_notional=1000,
+            positions=[],
+            open_orders=[FakeOrder(status="new", qty=20, limit_price=200)],
+            max_single_position_pct=0.20,
+            max_total_exposure_pct=0.50,
+        )
+        self.assertFalse(ok)
+
+    def test_idempotent_submit_reconciles_existing_order(self):
+        client = FakeClient()
+        order_data = type("Order", (), {
+            "symbol": "BTC/USD",
+            "side": "buy",
+            "qty": 0.01,
+            "notional": None,
+            "client_order_id": None,
+        })()
+
+        first = execution_idempotency.submit_order_idempotente(
+            client, order_data, submit_callable=client.submit_order
+        )
+        second = execution_idempotency.submit_order_idempotente(
+            client, order_data, submit_callable=client.submit_order
+        )
+
+        self.assertEqual(client.submit_calls, 1)
+        self.assertIs(first, second)
 
 
-def revisar_posiciones():
-    """
-    Revisa todas las posiciones y garantiza que tengan
-    Stop Loss y Take Profit.
-    """
-
-    posiciones = obtener_posiciones()
-
-    if not posiciones:
-        return
-
-    for posicion in posiciones:
-        ticker = posicion.symbol
-
-        try:
-            tiene_stop, tiene_tp = comprobar_proteccion(ticker)
-
-            log.info(
-                f"{ticker}: "
-                f"SL={'✅' if tiene_stop else '❌'} "
-                f"TP={'✅' if tiene_tp else '❌'}"
-            )
-
-            if not tiene_stop or not tiene_tp:
-                proteger_posicion(ticker)
-
-        except Exception as e:
-            log.error(f"{ticker}: error revisando protección: {e}")
+if __name__ == "__main__":
+    unittest.main()
