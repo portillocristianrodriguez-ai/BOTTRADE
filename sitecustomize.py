@@ -1,4 +1,4 @@
-"""Execution hardening, portfolio-aware signals and dynamic position sizing."""
+"""Execution hardening, portfolio-aware signals, dynamic sizing and market regime."""
 from __future__ import annotations
 
 import builtins
@@ -9,6 +9,7 @@ _INSTALLED_BROKER = False
 _INSTALLED_STRATEGY = False
 _ORIGINAL_IMPORT = builtins.__import__
 _PORTFOLIO = {"bucket": None, "items": []}
+_REGIME_CACHE = {"ts": 0.0, "data": None}
 
 
 def _client_id(order_data):
@@ -170,6 +171,28 @@ def _clamp(value, low, high):
     return min(high, max(low, value))
 
 
+def _obtener_regimen_global(broker_module):
+    """Calcula el régimen BTC una vez por ciclo corto y lo reutiliza."""
+    now = time.time()
+    if _REGIME_CACHE["data"] is not None and now - _REGIME_CACHE["ts"] < 180:
+        return _REGIME_CACHE["data"]
+    try:
+        import market_regime
+        datos = broker_module.obtener_datos_crypto_lote(["BTC/USD"], dias=3)
+        btc = datos.get("BTC/USD") or datos.get("BTCUSD")
+        regime = market_regime.evaluar_regimen_btc(btc)
+        _REGIME_CACHE["ts"] = now
+        _REGIME_CACHE["data"] = regime
+        broker_module.log.info(
+            f"[REGIMEN] BTC={regime.get('regimen')} score={regime.get('score', 50):.1f} "
+            f"confidence={regime.get('confidence', 0):.2f}"
+        )
+        return regime
+    except Exception as exc:
+        broker_module.log.warning(f"[REGIMEN] no disponible; se usa neutral: {exc}")
+        return {"regimen": "neutral", "score": 50.0, "confidence": 0.0}
+
+
 def _install_strategy(strategy_module):
     global _INSTALLED_STRATEGY
     if _INSTALLED_STRATEGY:
@@ -194,8 +217,6 @@ def _install_strategy(strategy_module):
             atr_pct = max(0.0, float(result.get("atr_pct", 0) or 0))
             breakout = bool(result.get("breakout", False))
 
-            # Calidad de oportunidad: premia impulso/volumen real y breakout,
-            # pero evita que una volatilidad extrema domine el ranking.
             quality_bonus = _clamp(momentum, 0.0, 4.0) * 1.25
             quality_bonus += _clamp(volume_ratio - 1.0, 0.0, 3.0) * 1.0
             quality_bonus += 2.5 if breakout else 0.0
@@ -208,12 +229,23 @@ def _install_strategy(strategy_module):
                     continue
                 corr = abs(_corr(df, item["df"]))
                 weight = _clamp(item["score"] / 100.0, 0.0, 1.0)
-                # Penalización acumulativa: evita llenar la cartera con clones.
                 correlation_penalty += 10.0 * corr * weight
-
             correlation_penalty = _clamp(correlation_penalty, 0.0, 20.0)
+
+            broker_module = __import__("broker")
+            regime = _obtener_regimen_global(broker_module)
+            regime_name = str(regime.get("regimen", "neutral"))
+            regime_score = float(regime.get("score", 50.0) or 50.0)
+            regime_adjustment = {
+                "alcista": 6.0,
+                "transicion_alcista": 2.0,
+                "neutral": 0.0,
+                "transicion_bajista": -6.0,
+                "bajista": -14.0,
+            }.get(regime_name, 0.0)
+
             portfolio_score = _clamp(
-                raw + quality_bonus - volatility_penalty - correlation_penalty,
+                raw + quality_bonus - volatility_penalty - correlation_penalty + regime_adjustment,
                 0.0,
                 100.0,
             )
@@ -224,6 +256,17 @@ def _install_strategy(strategy_module):
             result["volatility_penalty"] = volatility_penalty
             result["portfolio_score"] = portfolio_score
             result["correlation_penalty"] = correlation_penalty
+            result["market_regime"] = regime_name
+            result["market_regime_score"] = regime_score
+            result["market_regime_adjustment"] = regime_adjustment
+
+            # En régimen bajista no apagamos todo el scanner: reducimos la
+            # frecuencia de entradas débiles, conservando oportunidades muy
+            # fuertes para el perfil agresivo-controlado.
+            hard_block_bear = regime_name == "bajista" and raw < 84.0
+            if hard_block_bear:
+                result["comprar"] = False
+                result.setdefault("motivo", []).append("BTC en régimen bajista")
 
             if result.get("comprar", False):
                 result["score"] = portfolio_score
@@ -237,6 +280,8 @@ def _install_strategy(strategy_module):
                     key=lambda x: x["score"],
                     reverse=True,
                 )[:12]
+            else:
+                result["score"] = portfolio_score
             return result
         except Exception:
             return result
