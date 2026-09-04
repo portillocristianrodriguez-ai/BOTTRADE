@@ -1,3 +1,10 @@
+"""Regression tests for adaptive crypto execution quality.
+
+Run with: python -m unittest test_execution_quality.py
+"""
+
+import unittest
+
 import execution_quality
 
 
@@ -21,47 +28,49 @@ class Client:
         return {request.symbol_or_symbols: self.book}
 
 
-def test_tight_liquid_book_accepts():
-    client = Client(Book(
-        asks=[Level(100.10, 1000)],
-        bids=[Level(99.90, 1000)],
-    ))
-    result = execution_quality.evaluate_crypto_orderbook(
-        client, "BTC/USD", 5000, max_spread_pct=0.90,
-        min_top_depth_usd=1500, max_depth_ratio=0.60,
-    )
-    assert result["ok"] is True
-    assert result["spread_pct"] < 0.90
+class ExecutionQualityTests(unittest.TestCase):
+    def test_tight_liquid_book_accepts(self):
+        client = Client(Book(
+            asks=[Level(100.10, 1000)],
+            bids=[Level(99.90, 1000)],
+        ))
+        result = execution_quality.evaluate_crypto_orderbook(
+            client, "BTC/USD", 5000, max_spread_pct=0.90,
+            min_top_depth_usd=1500, max_depth_ratio=0.60,
+        )
+        self.assertTrue(result["ok"])
+        self.assertLess(result["spread_pct"], 0.90)
+
+    def test_wide_spread_blocks(self):
+        client = Client(Book(
+            asks=[Level(101.0, 1000)],
+            bids=[Level(99.0, 1000)],
+        ))
+        result = execution_quality.evaluate_crypto_orderbook(
+            client, "BTC/USD", 500, max_spread_pct=0.90,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "spread_too_wide")
+
+    def test_thin_book_recommends_smaller_size(self):
+        client = Client(Book(
+            asks=[Level(100.10, 10)],
+            bids=[Level(99.90, 100)],
+        ))
+        result = execution_quality.evaluate_crypto_orderbook(
+            client, "BTC/USD", 5000, max_spread_pct=0.90,
+            min_top_depth_usd=1500, max_depth_ratio=0.60,
+        )
+        self.assertTrue(result["ok"])
+        self.assertLess(result["recommended_notional"], 5000)
+
+    def test_missing_data_is_non_blocking(self):
+        result = execution_quality.evaluate_crypto_orderbook(
+            None, "BTC/USD", 5000,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "unavailable")
 
 
-def test_wide_spread_blocks():
-    client = Client(Book(
-        asks=[Level(101.0, 1000)],
-        bids=[Level(99.0, 1000)],
-    ))
-    result = execution_quality.evaluate_crypto_orderbook(
-        client, "BTC/USD", 500, max_spread_pct=0.90,
-    )
-    assert result["ok"] is False
-    assert result["reason"] == "spread_too_wide"
-
-
-def test_thin_book_recommends_smaller_size():
-    client = Client(Book(
-        asks=[Level(100.10, 10)],
-        bids=[Level(99.90, 100)],
-    ))
-    result = execution_quality.evaluate_crypto_orderbook(
-        client, "BTC/USD", 5000, max_spread_pct=0.90,
-        min_top_depth_usd=1500, max_depth_ratio=0.60,
-    )
-    assert result["ok"] is True
-    assert result["recommended_notional"] < 5000
-
-
-def test_missing_orderbook_is_non_blocking():
-    result = execution_quality.evaluate_crypto_orderbook(
-        None, "BTC/USD", 5000,
-    )
-    assert result["ok"] is True
-    assert result["reason"] == "disabled_or_unavailable"
+if __name__ == "__main__":
+    unittest.main()
