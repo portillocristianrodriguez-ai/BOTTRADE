@@ -17,6 +17,10 @@ API_KEY = os.environ.get("ALPACA_API_KEY", "")
 API_SECRET = os.environ.get("ALPACA_API_SECRET", "")
 PAPER = _bool("ALPACA_PAPER", True)
 TICKERS = [x.strip().upper() for x in os.environ.get("TICKERS", "AAPL,MSFT,NVDA,TSLA,AMZN").split(",") if x.strip()]
+# Universo automático: la lista anterior se conserva como prioridad, pero Alpaca
+# añade todas las acciones US activas y negociables disponibles.
+STOCK_AUTO_UNIVERSE_ENABLED = _bool("STOCK_AUTO_UNIVERSE_ENABLED", True)
+STOCK_UNIVERSE_REFRESH_MINUTES = _int("STOCK_UNIVERSE_REFRESH_MINUTES", 60)
 CRYPTO_TICKERS = [x.strip().upper() for x in os.environ.get("CRYPTO_TICKERS", "BTC/USD,ETH/USD,SOL/USD").split(",") if x.strip()]
 CHECK_INTERVAL_MINUTES = _int("CHECK_INTERVAL_MINUTES", 5)
 STOCK_OBSERVATION_ENABLED = _bool("STOCK_OBSERVATION_ENABLED", True)
@@ -130,8 +134,6 @@ LOG_RISK_CHECKS = _bool("LOG_RISK_CHECKS", True)
 EXECUTION_STREAM_ENABLED = _bool("EXECUTION_STREAM_ENABLED", True)
 EXECUTION_STREAM_RECONNECT_MIN_SECONDS = _int("EXECUTION_STREAM_RECONNECT_MIN_SECONDS", 5)
 EXECUTION_STREAM_RECONNECT_MAX_SECONDS = _int("EXECUTION_STREAM_RECONNECT_MAX_SECONDS", 60)
-# Señal temprana: detecta aceleración local antes del breakout plenamente confirmado.
-# Se mantiene conservadora y no elimina los guards de riesgo/ejecución.
 EARLY_SIGNAL_ENABLED = _bool("EARLY_SIGNAL_ENABLED", True)
 EARLY_SIGNAL_TRADING_ENABLED = _bool("EARLY_SIGNAL_TRADING_ENABLED", True)
 EARLY_SIGNAL_MIN_SCORE = _float("EARLY_SIGNAL_MIN_SCORE", 82.0)
@@ -151,4 +153,5 @@ def validar():
     if DYNAMIC_EXIT_MICROSTRUCTURE_SPREAD_THRESHOLD_PCT <= 0: raise RuntimeError("Umbral de spread inválido.")
     if not (0 <= EARLY_SIGNAL_MIN_SCORE <= 100): raise RuntimeError("EARLY_SIGNAL_MIN_SCORE inválido.")
     if not (0 <= EARLY_SIGNAL_BASE_SCORE_FLOOR <= 100): raise RuntimeError("EARLY_SIGNAL_BASE_SCORE_FLOOR inválido.")
+    if STOCK_UNIVERSE_REFRESH_MINUTES <= 0: raise RuntimeError("STOCK_UNIVERSE_REFRESH_MINUTES inválido.")
     return True
