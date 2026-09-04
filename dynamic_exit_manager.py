@@ -7,6 +7,7 @@ import time
 
 import estrategia
 from dynamic_exit import evaluar_salida
+from orderbook_exit import obtener_contexto_orderbook
 
 _LOCK = threading.RLock()
 _LAST_ACTION = {}
@@ -112,6 +113,10 @@ def _obtener_contexto(broker, ticker, position):
         if precio <= 0 or atr <= 0:
             return None
         analysis = estrategia.analizar_impulso_crypto(df, ticker)
+        book = obtener_contexto_orderbook(
+            getattr(broker, "cliente_datos_crypto", None),
+            broker.normalizar_ticker_crypto(ticker),
+        )
         return {
             "precio_actual": precio,
             "pnl_pct": _num(getattr(position, "unrealized_plpc", 0)),
@@ -121,6 +126,9 @@ def _obtener_contexto(broker, ticker, position):
             "adx": _num(analysis.get("adx", row.get("adx", 0))),
             "regimen": analysis.get("regimen_local", "neutral"),
             "breakout": bool(analysis.get("breakout", False)),
+            "spread_pct": book.get("spread_pct"),
+            "orderbook_imbalance": book.get("book_imbalance"),
+            "orderbook_available": bool(book.get("available", False)),
         }
     except Exception:
         return None
@@ -144,9 +152,7 @@ def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
         if mensaje and log:
             log.warning("[DYNAMIC-EXIT] %s salida completa ejecutada: %s", ticker, motivo)
             try:
-                main_module.notificaciones.notificar(
-                    f"📉 DYNAMIC EXIT {ticker}\n{motivo}\n{mensaje}"
-                )
+                main_module.notificaciones.notificar(f"📉 DYNAMIC EXIT {ticker}\n{motivo}\n{mensaje}")
             except Exception:
                 pass
         return bool(mensaje)
@@ -168,10 +174,7 @@ def _gestionar_trailing_estricto(main_module, broker, ticker, ctx, log):
     maximo = max(_num(maximos.get(ticker, ctx["precio_actual"])), ctx["precio_actual"])
     maximos[ticker] = maximo
 
-    default_trail = _num(
-        getattr(main_module.config, "TRAILING_STOP_PCT", 0.015),
-        0.015,
-    )
+    default_trail = _num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015)
     trail = obtener_trailing_estricto(ticker, default_trail)
     retroceso = calcular_retroceso_trailing(maximo, ctx["precio_actual"])
     if retroceso < trail:
@@ -208,13 +211,9 @@ def _gestionar_previamente(main_module):
         if not ctx:
             continue
 
-        # Actualizamos primero el máximo; nunca usamos el precio actual como
-        # máximo después de una caída si ya existe un HWM superior.
         maximos = getattr(main_module, "_maximos_cripto", {})
         maximos[ticker] = max(_num(maximos.get(ticker, ctx["precio_actual"])), ctx["precio_actual"])
 
-        # El trailing ya endurecido se comprueba en CADA ciclo, incluso si la
-        # nueva lectura de la señal pasa a "hold". Esto evita perder el stop.
         if _gestionar_trailing_estricto(main_module, broker, ticker, ctx, log):
             limpiar_trailing(ticker)
             continue
@@ -227,10 +226,9 @@ def _gestionar_previamente(main_module):
             adx=ctx["adx"],
             regimen=ctx["regimen"],
             breakout=ctx["breakout"],
-            trailing_stop_pct=_num(
-                getattr(main_module.config, "TRAILING_STOP_PCT", 0.015),
-                0.015,
-            ),
+            spread_pct=ctx["spread_pct"] if ctx["orderbook_available"] else None,
+            orderbook_imbalance=(ctx["orderbook_imbalance"] if ctx["orderbook_available"] else None),
+            trailing_stop_pct=_num(getattr(main_module.config, "TRAILING_STOP_PCT", 0.015), 0.015),
         )
         action = decision.get("action", "hold")
 
@@ -294,10 +292,4 @@ def instalar(main_module):
     return True
 
 
-__all__ = [
-    "calcular_retroceso_trailing",
-    "registrar_trailing_mas_estricto",
-    "obtener_trailing_estricto",
-    "limpiar_trailing",
-    "instalar",
-]
+__all__ = ["calcular_retroceso_trailing", "registrar_trailing_mas_estricto", "obtener_trailing_estricto", "limpiar_trailing", "instalar"]
