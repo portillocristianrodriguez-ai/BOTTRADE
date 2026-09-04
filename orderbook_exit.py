@@ -27,7 +27,7 @@ def _level(level):
 
 
 def obtener_contexto_orderbook(data_client, symbol: str, niveles: int = 5) -> dict[str, Any]:
-    """Obtiene spread e imbalance del último order book disponible."""
+    """Obtiene spread, profundidad e imbalance por cantidad del último libro."""
     result = {
         "available": False,
         "spread_pct": None,
@@ -64,10 +64,14 @@ def obtener_contexto_orderbook(data_client, symbol: str, niveles: int = 5) -> di
             return result
 
         n = max(1, int(niveles))
-        bid_depth = sum(p * s for p, s in (_level(x) for x in bids[:n]) if p > 0 and s > 0)
-        ask_depth = sum(p * s for p, s in (_level(x) for x in asks[:n]) if p > 0 and s > 0)
-        total = bid_depth + ask_depth
-        imbalance = (bid_depth - ask_depth) / total if total > 0 else 0.0
+        bid_levels = [_level(x) for x in bids[:n]]
+        ask_levels = [_level(x) for x in asks[:n]]
+        bid_qty = sum(s for _, s in bid_levels if s > 0)
+        ask_qty = sum(s for _, s in ask_levels if s > 0)
+        bid_depth = sum(p * s for p, s in bid_levels if p > 0 and s > 0)
+        ask_depth = sum(p * s for p, s in ask_levels if p > 0 and s > 0)
+        total_qty = bid_qty + ask_qty
+        imbalance = (bid_qty - ask_qty) / total_qty if total_qty > 0 else 0.0
         mid = (bid_price + ask_price) / 2.0
         spread_pct = (ask_price - bid_price) / mid * 100.0
 
