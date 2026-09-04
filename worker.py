@@ -5,6 +5,7 @@ import threading
 
 import estrategia
 import crypto_ranker
+import dynamic_exit_manager
 from execution_stream import lanzar_stream_ejecuciones
 
 _PATTERN_CONTEXT = threading.local()
@@ -79,20 +80,13 @@ def _instalar_ranking_crypto(main_module):
                 volumen_dolar_medio = float((ultimas["close"] * ultimas["volume"]).mean())
 
             signal_score = float(resultado.get("score", 0.0) or 0.0)
-            portfolio_score = crypto_ranker.calcular_score_cartera(
-                resultado,
-                volumen_dolar_medio,
-            )
+            portfolio_score = crypto_ranker.calcular_score_cartera(resultado, volumen_dolar_medio)
 
             resultado = dict(resultado)
             resultado["signal_score"] = signal_score
             resultado["volumen_dolar_medio"] = volumen_dolar_medio
             resultado["portfolio_score"] = portfolio_score
             resultado["ranking_score"] = portfolio_score
-
-            # El scanner legacy ordena por `score`. Hacemos que ese campo
-            # represente el ranking de cartera, conservando la señal original
-            # para trazabilidad y sin alterar las defensas de ejecución.
             resultado["score"] = portfolio_score
             return resultado
         except Exception as exc:
@@ -156,6 +150,7 @@ def main():
     _instalar_observacion_robusta(bot)
     _instalar_ranking_crypto(bot)
     _instalar_sizing_por_score(bot)
+    dynamic_exit_manager.instalar(bot)
     lanzar_stream_ejecuciones()
     bot.main()
 
