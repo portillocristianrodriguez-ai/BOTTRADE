@@ -10,6 +10,7 @@ import persistence_hardening
 import strategy_data_hardening
 import telegram_hardening
 import telegram_startup_summary
+import telegram_webhook
 import worker
 
 
@@ -22,4 +23,5 @@ if __name__ == "__main__":
     persistence_hardening.instalar(bot)
     strategy_data_hardening.instalar(estrategia)
     telegram_hardening.instalar(bot)
+    telegram_webhook.instalar(bot)
     worker.main()
