@@ -6,7 +6,7 @@ import threading
 
 import estrategia
 import crypto_ranker
-import dynamic_exit_manager
+import dynamic_exit_manager_v2 as dynamic_exit_manager
 from execution_stream import lanzar_stream_ejecuciones
 
 _PATTERN_CONTEXT = threading.local()
@@ -20,6 +20,14 @@ def _numero_finito(value):
         return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
+
+
+def _es_crypto_ticker(main_module, ticker):
+    symbol = str(ticker or "").strip().upper()
+    if "/" in symbol:
+        return True
+    configured = getattr(getattr(main_module, "config", None), "CRYPTO_TICKERS", [])
+    return symbol in {str(x).strip().upper() for x in configured}
 
 
 def _observacion_valida_crypto(df):
@@ -65,7 +73,7 @@ def _instalar_observacion_robusta(main_module):
     def registrar_observacion_pattern(ticker, df, analisis_scanner=None, senal=None):
         if df is None or getattr(df, "empty", True):
             return
-        es_crypto = bool(main_module.broker.es_cripto(ticker))
+        es_crypto = _es_crypto_ticker(main_module, ticker)
         df_observacion = df
         try:
             columnas = {"atr", "rsi", "macd", "ema_rapida", "ema_lenta", "ema_tendencia", "volumen_ratio"}
