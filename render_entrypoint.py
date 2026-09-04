@@ -2,7 +2,7 @@
 
 Render espera que el proceso escuche en PORT. BOTTRADE es un worker continuo,
 por lo que este proceso expone un health endpoint mínimo mientras mantiene
-worker.py como proceso principal. No modifica la lógica de trading.
+worker_entrypoint.py como proceso principal.
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    process = subprocess.Popen([sys.executable, "worker.py"])
+    process = subprocess.Popen([sys.executable, "worker_entrypoint.py"])
     try:
         return process.wait()
     except KeyboardInterrupt:
