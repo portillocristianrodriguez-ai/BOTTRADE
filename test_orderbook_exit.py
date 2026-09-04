@@ -17,6 +17,7 @@ class TestOrderbookExit(unittest.TestCase):
         client.get_crypto_latest_orderbook.return_value = {"BTC/USD": self._book()}
         result = obtener_contexto_orderbook(client, "BTC/USD")
         self.assertTrue(result["available"])
+        # Imbalance is based on displayed quantity, not dollar value.
         self.assertAlmostEqual(result["book_imbalance"], 0.0, places=6)
         self.assertGreater(result["spread_pct"], 0.0)
 
