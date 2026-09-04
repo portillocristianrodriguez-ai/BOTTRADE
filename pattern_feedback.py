@@ -38,12 +38,7 @@ def _finite(value):
 
 
 def _resolve_records(ticker, current_price, now, config_module):
-    """Resuelve observaciones antiguas usando solo una observación posterior.
-
-    Una observación se considera válida para un horizonte cuando la siguiente
-    observación disponible del mismo ticker ocurre después de dicho horizonte.
-    Nunca mira barras futuras desde el momento de la observación.
-    """
+    """Resuelve observaciones antiguas usando solo una observación posterior."""
     path = getattr(config_module, "PATTERN_DATA_FILE", "pattern_observations.jsonl")
     if not os.path.exists(path):
         return 0
@@ -81,12 +76,11 @@ def _resolve_records(ticker, current_price, now, config_module):
             results = {}
             row["future_returns"] = results
 
+        row_changed = False
         elapsed_minutes = (now_dt - ts).total_seconds() / 60.0
         for horizon in horizons:
             key = str(horizon)
-            if key in results:
-                continue
-            if elapsed_minutes + 1e-9 < horizon:
+            if key in results or elapsed_minutes + 1e-9 < horizon:
                 continue
             result_pct = ((price_now - entry) / entry) * 100.0
             results[key] = {
@@ -96,8 +90,9 @@ def _resolve_records(ticker, current_price, now, config_module):
                 "status": "resolved",
             }
             changed += 1
+            row_changed = True
 
-        if changed:
+        if row_changed:
             row["forward_status"] = "resolved"
             row["forward_last_update_utc"] = now_dt.isoformat()
 
