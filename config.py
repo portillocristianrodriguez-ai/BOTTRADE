@@ -130,6 +130,12 @@ LOG_RISK_CHECKS = _bool("LOG_RISK_CHECKS", True)
 EXECUTION_STREAM_ENABLED = _bool("EXECUTION_STREAM_ENABLED", True)
 EXECUTION_STREAM_RECONNECT_MIN_SECONDS = _int("EXECUTION_STREAM_RECONNECT_MIN_SECONDS", 5)
 EXECUTION_STREAM_RECONNECT_MAX_SECONDS = _int("EXECUTION_STREAM_RECONNECT_MAX_SECONDS", 60)
+# Señal temprana: detecta aceleración local antes del breakout plenamente confirmado.
+# Se mantiene conservadora y no elimina los guards de riesgo/ejecución.
+EARLY_SIGNAL_ENABLED = _bool("EARLY_SIGNAL_ENABLED", True)
+EARLY_SIGNAL_TRADING_ENABLED = _bool("EARLY_SIGNAL_TRADING_ENABLED", True)
+EARLY_SIGNAL_MIN_SCORE = _float("EARLY_SIGNAL_MIN_SCORE", 82.0)
+EARLY_SIGNAL_BASE_SCORE_FLOOR = _float("EARLY_SIGNAL_BASE_SCORE_FLOOR", 55.0)
 
 def validar():
     if not API_KEY or not API_SECRET: raise RuntimeError("Faltan ALPACA_API_KEY/ALPACA_API_SECRET.")
@@ -143,4 +149,6 @@ def validar():
     if DYNAMIC_EXIT_MICROSTRUCTURE_MIN_SAMPLES < 1 or DYNAMIC_EXIT_MICROSTRUCTURE_WINDOW_SECONDS <= 0: raise RuntimeError("Parámetros de persistencia microestructura inválidos.")
     if not (-1.0 <= DYNAMIC_EXIT_MICROSTRUCTURE_IMBALANCE_THRESHOLD <= 1.0): raise RuntimeError("Umbral de imbalance inválido.")
     if DYNAMIC_EXIT_MICROSTRUCTURE_SPREAD_THRESHOLD_PCT <= 0: raise RuntimeError("Umbral de spread inválido.")
+    if not (0 <= EARLY_SIGNAL_MIN_SCORE <= 100): raise RuntimeError("EARLY_SIGNAL_MIN_SCORE inválido.")
+    if not (0 <= EARLY_SIGNAL_BASE_SCORE_FLOOR <= 100): raise RuntimeError("EARLY_SIGNAL_BASE_SCORE_FLOOR inválido.")
     return True
