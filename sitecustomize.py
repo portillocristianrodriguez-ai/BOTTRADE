@@ -1,4 +1,4 @@
-"""Execution hardening and portfolio-aware signal diversification."""
+"""Execution hardening, portfolio-aware signals and dynamic position sizing."""
 from __future__ import annotations
 
 import builtins
@@ -49,10 +49,59 @@ def _install_broker(broker_module):
     client = getattr(broker_module, "cliente_trading", None)
     submit = getattr(client, "submit_order", None) if client is not None else None
     validate = getattr(broker_module, "_validar_orden_compra_final", None)
-    if client is None or not callable(submit) or not callable(validate):
+    size_original = getattr(broker_module, "calcular_tamano_posicion", None)
+    if client is None or not callable(submit) or not callable(validate) or not callable(size_original):
         return
 
     _disable_secondary_account(broker_module)
+
+    def dynamic_size(ticker, precio, atr):
+        """Ajusta el tamaño por volatilidad sin saltarse los límites de riesgo."""
+        qty = size_original(ticker, precio, atr)
+        try:
+            import config
+            precio = float(precio)
+            atr = float(atr)
+            if qty <= 0 or precio <= 0 or atr <= 0:
+                return qty
+
+            atr_pct = atr / precio
+            if atr_pct <= 0:
+                return qty
+
+            if broker_module.es_cripto(ticker):
+                objetivo = float(getattr(config, "CRYPTO_TARGET_ATR_PCT", 0.020))
+            else:
+                objetivo = float(getattr(config, "STOCK_TARGET_ATR_PCT", 0.015))
+
+            minimo = float(getattr(config, "DYNAMIC_RISK_MIN_MULTIPLIER", 0.60))
+            maximo = float(getattr(config, "DYNAMIC_RISK_MAX_MULTIPLIER", 1.15))
+            minimo = min(1.0, max(0.10, minimo))
+            maximo = max(1.0, min(1.50, maximo))
+            objetivo = max(0.0001, objetivo)
+
+            # Menor ATR relativo => algo más de tamaño; mayor ATR => menos.
+            factor = objetivo / atr_pct
+            factor = min(maximo, max(minimo, factor))
+            ajustada = float(qty) * factor
+
+            if broker_module.es_cripto(ticker):
+                ajustada = round(ajustada, 6)
+            else:
+                ajustada = int(ajustada)
+
+            if ajustada <= 0:
+                return 0
+
+            if abs(factor - 1.0) >= 0.02:
+                broker_module.log.info(
+                    f"[SIZING] {ticker}: ATR%={atr_pct:.4%} objetivo={objetivo:.4%} "
+                    f"factor={factor:.3f} qty={qty}->{ajustada}"
+                )
+            return ajustada
+        except Exception as exc:
+            broker_module.log.warning(f"[SIZING] {ticker}: sizing dinámico omitido: {exc}")
+            return qty
 
     def risk_check(ticker, qty, price):
         if not validate(ticker, qty, price):
@@ -108,6 +157,7 @@ def _install_broker(broker_module):
             broker_module.log.info(f"[GUARDIA] client_order_id={cid}")
         return submit(order_data=order_data, *args, **kwargs)
 
+    broker_module.calcular_tamano_posicion = dynamic_size
     broker_module._validar_orden_compra_final = risk_check
     client.submit_order = guarded_submit
     _INSTALLED_BROKER = True
