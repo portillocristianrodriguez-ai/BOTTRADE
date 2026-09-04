@@ -99,18 +99,6 @@ def iniciar_comandos(callback):
     """
     Inicia un hilo independiente que escucha comandos
     enviados por Telegram.
-
-    Los comandos son enviados a:
-
-        callback(comando)
-
-    Ejemplos:
-
-        /saldo
-        /posiciones
-        /estado
-        /scanner
-        /help
     """
 
     hilo = threading.Thread(
@@ -134,6 +122,7 @@ def iniciar_comandos(callback):
 def _loop_comandos(callback):
 
     offset = None
+    conflictos_409 = 0
 
     url = (
         f"https://api.telegram.org/"
@@ -165,30 +154,37 @@ def _loop_comandos(callback):
             # ====================================================
             # CONFLICTO 409
             # ====================================================
+            #
+            # Telegram solo permite un receptor mediante
+            # getUpdates. Durante un redeploy de Railway puede
+            # existir solapamiento temporal entre la instancia
+            # anterior y la nueva. No matamos el listener ante
+            # el primer 409: esperamos y recuperamos el polling.
+            # ====================================================
 
             if respuesta.status_code == 409:
 
-                log.error(
-                    "[Telegram] ERROR 409: "
-                    "otro programa o instancia está utilizando "
-                    "el mismo bot para recibir mensajes "
-                    "mediante getUpdates."
+                conflictos_409 += 1
+
+                espera = min(
+                    60,
+                    15 * conflictos_409,
                 )
 
-                log.error(
-                    "[Telegram] Se detiene este listener para "
-                    "evitar reintentos infinitos. Debe existir "
-                    "una sola instancia de getUpdates."
+                log.warning(
+                    "[Telegram] Conflicto 409: existe "
+                    "otro receptor de getUpdates. "
+                    f"Reintentando en {espera}s "
+                    f"(intento {conflictos_409})."
                 )
 
-                # Telegram solo permite un receptor mediante
-                # getUpdates. Reintentar cada pocos segundos no
-                # resuelve el conflicto y genera ruido innecesario.
-                return
+                time.sleep(espera)
+                continue
 
-            # ====================================================
-            # OTROS ERRORES HTTP
-            # ====================================================
+            # Cualquier respuesta correcta rompe la racha de
+            # conflictos y devuelve el listener a funcionamiento
+            # normal.
+            conflictos_409 = 0
 
             if respuesta.status_code != 200:
 
@@ -212,10 +208,6 @@ def _loop_comandos(callback):
 
                 time.sleep(5)
                 continue
-
-            # ====================================================
-            # PROCESAR ACTUALIZACIONES
-            # ====================================================
 
             for update in datos.get(
                 "result",
