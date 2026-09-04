@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 
 import estrategia
+import crypto_ranker
 from execution_stream import lanzar_stream_ejecuciones
 
 _PATTERN_CONTEXT = threading.local()
@@ -60,6 +61,36 @@ def _instalar_observacion_robusta(main_module):
     main_module.registrar_observacion_pattern = registrar_observacion_pattern
 
 
+def _instalar_ranking_crypto(main_module):
+    """Conecta el ranking de cartera al score que ya consume el scanner."""
+    original_analysis = getattr(estrategia, "analizar_impulso_crypto", None)
+    if not callable(original_analysis):
+        return
+    if getattr(original_analysis, "_bottrade_portfolio_ranked", False):
+        return
+
+    def analizar_ranked(df, ticker):
+        resultado = original_analysis(df, ticker)
+        if not isinstance(resultado, dict):
+            return resultado
+        try:
+            volumen = 0.0
+            if df is not None and not getattr(df, "empty", True):
+                ultimas = df.tail(12)
+                volumen = float((ultimas["close"] * ultimas["volume"]).mean())
+            resultado = crypto_ranker.enriquecer_candidatos(
+                [(ticker, df, resultado)]
+            )[0][2]
+            resultado["ranking_score"] = resultado.get("portfolio_score", resultado.get("score", 0))
+            return resultado
+        except Exception as exc:
+            main_module.log.warning("[ranking] %s: ranking omitido: %s", ticker, exc)
+            return resultado
+
+    analizar_ranked._bottrade_portfolio_ranked = True
+    estrategia.analizar_impulso_crypto = analizar_ranked
+
+
 def _instalar_sizing_por_score(main_module):
     """Modula el tamaño crypto según la calidad de la señal, sin saltar guards."""
     broker_module = getattr(main_module, "broker", None)
@@ -111,6 +142,7 @@ def _instalar_sizing_por_score(main_module):
 def main():
     import main as bot
     _instalar_observacion_robusta(bot)
+    _instalar_ranking_crypto(bot)
     _instalar_sizing_por_score(bot)
     lanzar_stream_ejecuciones()
     bot.main()
