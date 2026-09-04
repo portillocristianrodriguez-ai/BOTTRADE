@@ -267,6 +267,10 @@ def _loop_comandos(callback):
                             f"[Telegram] Error ejecutando {comando}: {e}"
                         )
                         notificar(f"❌ Error ejecutando {comando}.")
+
+            except Exception as e:
+                log.error(f"[Telegram] Error en receptor getUpdates: {e}")
+                time.sleep(5)
     finally:
         global _comandos_iniciado
         _comandos_iniciado = False
