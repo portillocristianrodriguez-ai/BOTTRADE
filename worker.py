@@ -6,6 +6,7 @@ import threading
 
 import estrategia
 import crypto_ranker
+import early_signal
 import dynamic_exit_manager_v2 as dynamic_exit_manager
 from execution_stream import lanzar_stream_ejecuciones
 
@@ -145,6 +146,65 @@ def _instalar_ranking_crypto(main_module):
     estrategia.analizar_impulso_crypto = analizar_ranked
 
 
+def _integrar_senal_temprana(original, df, ticker, es_crypto):
+    """Añade una entrada temprana solo cuando hay confluencia suficiente.
+
+    No sustituye la estrategia base: conserva su score/diagnóstico y solo
+    habilita `comprar` cuando la aceleración temprana supera un umbral alto.
+    """
+    resultado = original(df, ticker)
+    if not isinstance(resultado, dict):
+        return resultado
+    try:
+        cfg = __import__("config")
+        enabled = bool(getattr(cfg, "EARLY_SIGNAL_ENABLED", True))
+        trading = bool(getattr(cfg, "EARLY_SIGNAL_TRADING_ENABLED", True))
+        threshold = float(getattr(cfg, "EARLY_SIGNAL_MIN_SCORE", 82.0))
+        if not enabled:
+            return resultado
+
+        early = early_signal.evaluar(df, es_crypto=es_crypto, min_score=threshold)
+        salida = dict(resultado)
+        salida["early_signal"] = early
+        salida["early_signal_score"] = float(early.get("score", 0.0) or 0.0)
+        salida["early_signal_active"] = bool(early.get("comprar_temprano"))
+
+        if trading and early.get("comprar_temprano"):
+            base_score = float(salida.get("score", 0.0) or 0.0)
+            # El motor temprano no puede rescatar una señal claramente bajista.
+            regimen = str(salida.get("regimen", "")).lower()
+            if regimen not in {"bajista"} and base_score >= float(getattr(cfg, "EARLY_SIGNAL_BASE_SCORE_FLOOR", 55.0)):
+                salida["comprar"] = True
+                salida["score"] = max(base_score, threshold)
+                motivos = list(salida.get("motivo", []) or [])
+                motivos.append("⚡ señal temprana: aceleración + momentum + confluencia")
+                motivos.extend(f"early:{m}" for m in early.get("motivos", [])[:4])
+                salida["motivo"] = motivos
+        return salida
+    except Exception as exc:
+        try:
+            __import__("logging").getLogger(__name__).debug("[early-signal] %s omitida: %s", ticker, exc)
+        except Exception:
+            pass
+        return resultado
+
+
+def _instalar_senales_tempranas():
+    """Envuelve acciones y crypto para no perder el inicio de impulsos."""
+    original_crypto = getattr(estrategia, "analizar_impulso_crypto", None)
+    original_acciones = getattr(estrategia, "analizar_impulso_acciones", None)
+    if callable(original_crypto) and not getattr(original_crypto, "_bottrade_early_signal", False):
+        def crypto_early(df, ticker):
+            return _integrar_senal_temprana(original_crypto, df, ticker, True)
+        crypto_early._bottrade_early_signal = True
+        estrategia.analizar_impulso_crypto = crypto_early
+    if callable(original_acciones) and not getattr(original_acciones, "_bottrade_early_signal", False):
+        def acciones_early(df, ticker):
+            return _integrar_senal_temprana(original_acciones, df, ticker, False)
+        acciones_early._bottrade_early_signal = True
+        estrategia.analizar_impulso_acciones = acciones_early
+
+
 def _instalar_sizing_por_score(main_module):
     """Modula el tamaño crypto según la calidad de la señal, sin saltar guards."""
     broker_module = getattr(main_module, "broker", None)
@@ -194,6 +254,7 @@ def _instalar_sizing_por_score(main_module):
 def main():
     import main as bot
     _instalar_observacion_robusta(bot)
+    _instalar_senales_tempranas()
     _instalar_ranking_crypto(bot)
     _instalar_sizing_por_score(bot)
     dynamic_exit_manager.instalar(bot)
