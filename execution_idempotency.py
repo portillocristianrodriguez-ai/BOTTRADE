@@ -1,8 +1,7 @@
 """Idempotencia y reconciliación segura de órdenes para BOTTRADE."""
 from __future__ import annotations
 
-import hashlib
-import time
+import uuid
 from typing import Any, Callable, Optional
 
 
@@ -22,15 +21,16 @@ def crear_client_order_id(
     notional: Any = "",
     operation_bucket_seconds: int = 300,
 ) -> str:
-    """Genera un client_order_id estable dentro de una ventana temporal."""
-    symbol = str(ticker or "ORDER").upper().replace("/", "")
-    bucket_size = max(1, int(operation_bucket_seconds))
-    bucket = int(time.time() // bucket_size)
-    raw = "|".join(
-        (symbol, str(side or "buy").lower(), str(qty or ""), str(notional or ""), str(bucket))
-    )
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-    return f"BT-{symbol[:12]}-{digest}"
+    """Genera un ID único por objeto lógico de orden.
+
+    El UUID evita reutilizar el mismo client_order_id para dos operaciones
+    legítimas posteriores. Si un submit falla con resultado incierto, el mismo
+    objeto de orden conserva el ID y puede reconciliarse sin reenviar a ciegas.
+    """
+    symbol = str(ticker or "ORDER").upper().replace("/", "")[:12] or "ORDER"
+    side_text = str(side or "buy").lower()[:1] or "b"
+    nonce = uuid.uuid4().hex[:16]
+    return f"BT-{symbol}-{side_text}-{nonce}"
 
 
 def buscar_orden_por_client_id(cliente: Any, client_order_id: str):
@@ -55,7 +55,7 @@ def estado_no_reintentable(order: Any) -> bool:
 
 
 def preparar_client_order_id(order_data: Any, operation_bucket_seconds: int = 300) -> str:
-    """Obtiene el ID existente o genera uno estable para la operación."""
+    """Obtiene el ID existente o genera uno nuevo para esta orden."""
     existente = getattr(order_data, "client_order_id", None)
     if existente:
         return str(existente)
@@ -84,12 +84,15 @@ def submit_order_idempotente(
     order_data: Any,
     submit_callable: Optional[Callable[..., Any]] = None,
 ):
-    """Envía una orden sin reenvío ciego cuando el resultado es incierto.
+    """Envía una orden y reconcilia el resultado si el submit falla.
 
-    ``submit_callable`` permite usar esta función desde una capa que envuelve
-    ``cliente.submit_order`` sin provocar recursión. Si no se proporciona,
-    utiliza el método actual del cliente.
+    No hace reintentos ciegos. El client_order_id queda pegado al objeto de
+    orden durante toda la operación, por lo que una llamada de reconciliación
+    puede consultar exactamente la misma identidad en Alpaca.
     """
+    if order_data is None:
+        raise ValueError("order_data es obligatorio")
+
     client_order_id = preparar_client_order_id(order_data)
     order_data = aplicar_client_order_id(order_data, client_order_id)
 
