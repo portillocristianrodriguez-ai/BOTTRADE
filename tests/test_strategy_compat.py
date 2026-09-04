@@ -1,3 +1,5 @@
+import unittest
+
 import numpy as np
 import pandas as pd
 
@@ -19,13 +21,17 @@ def _df(rows=180):
     )
 
 
-def test_generar_senal_publica_existe_y_no_falla():
-    assert callable(getattr(estrategia, "generar_senal", None))
-    assert estrategia.generar_senal(_df()) in {"COMPRAR", "VENDER", "ESPERAR"}
+class StrategyCompatibilityTests(unittest.TestCase):
+    def test_generar_senal_publica_existe_y_no_falla(self):
+        self.assertTrue(callable(getattr(estrategia, "generar_senal", None)))
+        self.assertIn(estrategia.generar_senal(_df()), {"COMPRAR", "VENDER", "ESPERAR"})
+
+    def test_mtf_expone_alias_compatible(self):
+        result = estrategia._confirmacion_multitimeframe(_df())
+        self.assertIn("alineacion", result)
+        self.assertIn("mtf_alineacion", result)
+        self.assertEqual(result["mtf_alineacion"], result["alineacion"])
 
 
-def test_mtf_expone_alias_compatible():
-    result = estrategia._confirmacion_multitimeframe(_df())
-    assert "alineacion" in result
-    assert "mtf_alineacion" in result
-    assert result["mtf_alineacion"] == result["alineacion"]
+if __name__ == "__main__":
+    unittest.main()
