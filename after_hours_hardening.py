@@ -1,9 +1,8 @@
 """Refuerzo de observación fuera de mercado.
 
-El universo completo se reserva para el scanner durante mercado abierto.
-Fuera de mercado solo se observan los tickers manuales/prioritarios, evitando
-miles de consultas históricas inútiles cada ciclo y sin tocar la lógica de
-órdenes, riesgo, SL/TP ni exposición.
+Fuera de mercado se utiliza el mismo universo dinámico completo de acciones
+negociables que durante mercado abierto. No existe una lista de tickers
+prioritarios ni se altera la lógica de órdenes, riesgo, SL/TP o exposición.
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ def instalar(main_module):
     broker = main_module.broker
     estrategia = main_module.estrategia
 
-    def observar_prioridades():
+    def observar_universo():
         if not getattr(config, "STOCK_OBSERVATION_ENABLED", True):
             return
 
@@ -28,26 +27,28 @@ def instalar(main_module):
         if sesion == "REGULAR":
             return
 
-        tickers = list(getattr(config, "TICKERS", []))
-        # El universo dinámico ya contiene los manuales al principio. Estos
-        # son los únicos que necesitamos observar cuando el mercado está cerrado.
-        manuales = []
-        for ticker in tickers:
-            if ticker not in manuales:
-                manuales.append(ticker)
-            if len(manuales) >= 5:
-                break
+        try:
+            import stock_universe
+            tickers = stock_universe.obtener_universo(config, broker)
+        except Exception as exc:
+            main_module.log.warning(
+                "[acciones observación] No se pudo obtener el universo dinámico: %s",
+                exc,
+            )
+            tickers = list(getattr(config, "TICKERS", []))
 
-        if not manuales:
+        tickers = sorted(set(ticker for ticker in tickers if ticker))
+
+        if not tickers:
             return
 
         main_module.log.info(
-            "[acciones observación] Sesión=%s. Observando %s tickers prioritarios.",
+            "[acciones observación] Sesión=%s. Observando %s acciones del universo completo.",
             sesion,
-            len(manuales),
+            len(tickers),
         )
 
-        for ticker in manuales:
+        for ticker in tickers:
             try:
                 df = broker.obtener_datos(ticker)
                 if df is None or df.empty:
@@ -63,8 +64,8 @@ def instalar(main_module):
                     exc,
                 )
 
-    main_module.observar_acciones_fuera_de_mercado = observar_prioridades
+    main_module.observar_acciones_fuera_de_mercado = observar_universo
     main_module._bottrade_after_hours_hardening = True
     main_module.log.info(
-        "[seguridad] Observación fuera de mercado limitada a tickers prioritarios."
+        "[seguridad] Observación fuera de mercado usa el universo completo; sin prioridades."
     )
