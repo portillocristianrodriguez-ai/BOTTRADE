@@ -9,9 +9,8 @@ import early_signal
 class EarlySignalTests(unittest.TestCase):
     def _frame(self):
         n = 70
-        close = np.linspace(100, 103, n)
-        # Aceleración reciente hacia una ruptura, sin depender de datos futuros.
-        close[-6:] = [103.0, 103.12, 103.28, 103.55, 103.95, 104.45]
+        close = np.array([100 + (i * 0.04) + (0.15 if i % 4 == 0 else -0.03) for i in range(n)], float)
+        close[-7:] = [102.8, 102.5, 102.9, 102.7, 103.0, 102.95, 103.5]
         high = close + 0.12
         low = close - 0.12
         volume = np.full(n, 1000.0)
