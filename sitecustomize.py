@@ -1,100 +1,67 @@
-"""Hardening de ejecución de BOTTRADE.
-
-Se mantiene deliberadamente acotado al módulo ``broker`` de este proyecto.
-No modifica globalmente el SDK de Alpaca. La capa principal de broker sigue
-siendo la responsable de las validaciones funcionales de las órdenes.
-"""
-
+"""Execution hardening and portfolio-aware signal diversification."""
 from __future__ import annotations
 
 import builtins
 import hashlib
 import time
 
-_INSTALLED = False
+_INSTALLED_BROKER = False
+_INSTALLED_STRATEGY = False
 _ORIGINAL_IMPORT = builtins.__import__
+_PORTFOLIO = {"bucket": None, "items": []}
 
 
-def _client_id(order_data) -> str:
-    """ID determinista corto para evitar dobles envíos de la misma intención."""
+def _client_id(order_data):
     symbol = str(getattr(order_data, "symbol", "ORDER") or "ORDER").upper().replace("/", "")
     side = str(getattr(order_data, "side", "NA") or "NA").upper()
-    order_type = str(getattr(order_data, "type", getattr(order_data, "order_type", "market")) or "market").lower()
+    typ = str(getattr(order_data, "type", getattr(order_data, "order_type", "market")) or "market").lower()
     qty = str(getattr(order_data, "qty", "") or "")
     notional = str(getattr(order_data, "notional", "") or "")
     limit_price = str(getattr(order_data, "limit_price", "") or "")
     stop_price = str(getattr(order_data, "stop_price", "") or "")
-    # Cinco minutos: suficientemente corto para el scanner y suficientemente
-    # estable para que dos procesos que detecten la misma señal coincidan.
     bucket = int(time.time() // 300)
-    payload = "|".join((symbol, side, order_type, qty, notional, limit_price, stop_price, str(bucket)))
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+    raw = "|".join((symbol, side, typ, qty, notional, limit_price, stop_price, str(bucket)))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     return f"BT-MOM-{symbol[:12]}-{digest}"
 
 
-def _install(broker_module):
-    global _INSTALLED
-    if _INSTALLED:
+def _install_broker(broker_module):
+    global _INSTALLED_BROKER
+    if _INSTALLED_BROKER:
         return
-
     client = getattr(broker_module, "cliente_trading", None)
-    original_submit = getattr(client, "submit_order", None) if client is not None else None
-    original_validate = getattr(broker_module, "_validar_orden_compra_final", None)
-    if client is None or not callable(original_submit) or not callable(original_validate):
+    submit = getattr(client, "submit_order", None) if client is not None else None
+    validate = getattr(broker_module, "_validar_orden_compra_final", None)
+    if client is None or not callable(submit) or not callable(validate):
         return
 
-    def validar_con_riesgo_final(ticker, cantidad, precio_referencia):
-        if not original_validate(ticker, cantidad, precio_referencia):
+    def risk_check(ticker, qty, price):
+        if not validate(ticker, qty, price):
             return False
-
         try:
             import config
             import execution_guard
             from alpaca.trading.enums import QueryOrderStatus
             from alpaca.trading.requests import GetOrdersRequest
-
-            cuenta = client.get_account()
-            equity = float(getattr(cuenta, "equity", 0) or 0)
-            buying_power = float(getattr(cuenta, "buying_power", 0) or 0)
-            proposed = float(cantidad) * float(precio_referencia)
+            account = client.get_account()
+            equity = float(getattr(account, "equity", 0) or 0)
+            buying_power = float(getattr(account, "buying_power", 0) or 0)
+            proposed = float(qty) * float(price)
             if equity <= 0 or buying_power <= 0 or proposed <= 0:
                 return False
-
-            max_bp_pct = float(getattr(config, "MAX_BUYING_POWER_USAGE_PCT", 0.90))
-            max_bp_pct = min(0.99, max(0.10, max_bp_pct))
-            if proposed > buying_power * max_bp_pct + 0.01:
-                broker_module.log.critical(
-                    f"[GUARDIA] {ticker}: compra bloqueada por buying power. "
-                    f"Notional=${proposed:,.2f} > ${buying_power * max_bp_pct:,.2f}"
-                )
+            bp_pct = min(0.99, max(0.10, float(getattr(config, "MAX_BUYING_POWER_USAGE_PCT", 0.90))))
+            if proposed > buying_power * bp_pct + 0.01:
+                broker_module.log.critical(f"[GUARDIA] {ticker}: buying power insuficiente para nueva orden")
                 return False
-
             if broker_module.es_cripto(ticker):
-                internal_cap = float(getattr(config, "CRYPTO_INTERNAL_MAX_ORDER_NOTIONAL_USD", 100000.0))
-                if internal_cap > 0 and proposed > internal_cap + 0.01:
-                    broker_module.log.critical(
-                        f"[GUARDIA] {ticker}: crypto bloqueada por cap interno. "
-                        f"Notional=${proposed:,.2f} > ${internal_cap:,.2f}"
-                    )
+                cap = float(getattr(config, "CRYPTO_INTERNAL_MAX_ORDER_NOTIONAL_USD", 100000.0))
+                if cap > 0 and proposed > cap + 0.01:
+                    broker_module.log.critical(f"[GUARDIA] {ticker}: supera cap interno crypto")
                     return False
-
-            # Usamos únicamente APIs que existen en la capa actual del broker.
-            # Así el guard no puede romper el scanner por depender de helpers
-            # inexistentes.
             positions = client.get_all_positions()
-            open_filter = GetOrdersRequest(
-                status=QueryOrderStatus.OPEN,
-                limit=500,
-                nested=True,
-            )
-            open_orders = client.get_orders(filter=open_filter)
-
-            # Segunda barrera específica contra duplicados por símbolo.
-            if broker_module.tiene_posicion_abierta(ticker):
+            open_orders = client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True))
+            if broker_module.tiene_posicion_abierta(ticker) or broker_module.obtener_ordenes_ticker(ticker):
                 return False
-            if broker_module.obtener_ordenes_ticker(ticker):
-                return False
-
             ok, reason = execution_guard.validar_exposicion_compra(
                 equity=equity,
                 proposed_notional=proposed,
@@ -104,24 +71,13 @@ def _install(broker_module):
                 max_total_exposure_pct=float(getattr(config, "MAX_TOTAL_EXPOSURE_PCT", 0.50)),
             )
             if not ok:
-                broker_module.log.critical(
-                    f"[GUARDIA] {ticker}: compra bloqueada por exposición: {reason}"
-                )
-                return False
-
-            broker_module.log.info(
-                f"[GUARDIA] {ticker}: riesgo final OK | Notional=${proposed:,.2f}"
-            )
-            return True
+                broker_module.log.critical(f"[GUARDIA] {ticker}: exposición bloqueada: {reason}")
+            return ok
         except Exception as exc:
-            # Fail closed: un fallo en la comprobación final nunca debe abrir
-            # una operación que no ha podido validarse.
-            broker_module.log.critical(
-                f"[GUARDIA] {ticker}: validación final fallida. ORDEN BLOQUEADA: {exc}"
-            )
+            broker_module.log.critical(f"[GUARDIA] {ticker}: validación final fallida; orden bloqueada: {exc}")
             return False
 
-    def submit_order_guarded(order_data=None, *args, **kwargs):
+    def guarded_submit(order_data=None, *args, **kwargs):
         if order_data is not None and not getattr(order_data, "client_order_id", None):
             cid = _client_id(order_data)
             try:
@@ -130,26 +86,77 @@ def _install(broker_module):
                 dumped = order_data.model_dump()
                 dumped["client_order_id"] = cid
                 order_data = type(order_data)(**dumped)
-            broker_module.log.info(
-                f"[GUARDIA] client_order_id={cid} | symbol={getattr(order_data, 'symbol', '?')}"
-            )
-        return original_submit(order_data=order_data, *args, **kwargs)
+            broker_module.log.info(f"[GUARDIA] client_order_id={cid}")
+        return submit(order_data=order_data, *args, **kwargs)
 
-    broker_module._validar_orden_compra_final = validar_con_riesgo_final
-    client.submit_order = submit_order_guarded
-    _INSTALLED = True
+    broker_module._validar_orden_compra_final = risk_check
+    client.submit_order = guarded_submit
+    _INSTALLED_BROKER = True
+
+
+def _corr(a, b):
+    try:
+        import pandas as pd
+        ra = pd.to_numeric(a["close"], errors="coerce").pct_change()
+        rb = pd.to_numeric(b["close"], errors="coerce").pct_change()
+        joined = pd.concat([ra, rb], axis=1, join="inner").dropna()
+        if len(joined) < 12:
+            return 0.0
+        value = float(joined.iloc[:, 0].corr(joined.iloc[:, 1]))
+        return value if pd.notna(value) else 0.0
+    except Exception:
+        return 0.0
+
+
+def _install_strategy(strategy_module):
+    global _INSTALLED_STRATEGY
+    if _INSTALLED_STRATEGY:
+        return
+    original = getattr(strategy_module, "analizar_impulso_crypto", None)
+    if not callable(original):
+        return
+
+    def portfolio_crypto(df, ticker):
+        result = original(df, ticker)
+        if not isinstance(result, dict):
+            return result
+        try:
+            bucket = int(time.time() // 180)
+            if _PORTFOLIO["bucket"] != bucket:
+                _PORTFOLIO["bucket"] = bucket
+                _PORTFOLIO["items"] = []
+            raw = float(result.get("score", 0) or 0)
+            penalty = 0.0
+            for item in _PORTFOLIO["items"]:
+                corr = abs(_corr(df, item["df"]))
+                weight = min(1.0, max(0.0, item["score"] / 100.0))
+                penalty = max(penalty, 8.0 * corr * weight)
+            result = dict(result)
+            result["raw_score"] = raw
+            result["portfolio_score"] = max(0.0, raw - penalty)
+            result["correlation_penalty"] = penalty
+            _PORTFOLIO["items"].append({"ticker": str(ticker), "df": df, "score": raw})
+            _PORTFOLIO["items"] = sorted(_PORTFOLIO["items"], key=lambda x: x["score"], reverse=True)[:12]
+            return result
+        except Exception:
+            return result
+
+    strategy_module.analizar_impulso_crypto = portfolio_crypto
+    _INSTALLED_STRATEGY = True
 
 
 def _import(name, globals=None, locals=None, fromlist=(), level=0):
     module = _ORIGINAL_IMPORT(name, globals, locals, fromlist, level)
     if name == "broker" or name.endswith(".broker"):
         try:
-            _install(module)
+            _install_broker(module)
         except Exception:
-            # La aplicación puede arrancar con las defensas nativas del broker
-            # aunque el hook opcional no pueda instalarse.
+            pass
+    if name == "estrategia" or name.endswith(".estrategia"):
+        try:
+            _install_strategy(module)
+        except Exception:
             pass
     return module
-
 
 builtins.__import__ = _import
