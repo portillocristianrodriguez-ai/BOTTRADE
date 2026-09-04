@@ -1,12 +1,11 @@
-"""Descubrimiento conservador del universo de acciones de BOTTRADE.
+"""Descubrimiento completo del universo de acciones negociables de BOTTRADE.
 
-Esta capa SOLO actualiza la lista de símbolos que se observan/escanean.
-No genera señales, no modifica órdenes y no toca la gestión de posiciones.
+Esta capa SOLO actualiza los símbolos observados/escaneados. No genera
+señales, no modifica órdenes y no toca la gestión de posiciones.
 
-Los tickers configurados manualmente siempre tienen prioridad y se conservan.
-El universo descubierto se limita a acciones estadounidenses activas y
-negociables en bolsas principales, con un tope configurable para evitar una
-explosión de llamadas a datos.
+El universo no se recorta artificialmente a N símbolos: incluye todas las
+acciones estadounidenses activas y negociables que devuelve Alpaca. La
+estrategia sigue siendo la responsable de filtrar oportunidades.
 """
 from __future__ import annotations
 
@@ -15,25 +14,14 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 log = logging.getLogger(__name__)
-
 _LOCK = threading.RLock()
 _CACHE = []
 _UPDATED = None
 _REFRESH_THREAD_STARTED = False
 
 _EXCHANGES = {
-    "NYSE",
-    "NASDAQ",
-    "NASDAQOM",
-    "NASDAQGS",
-    "NASDAQCM",
-    "NASDAQGM",
-    "NYSEARCA",
-    "NYSEAMERICAN",
-    "AMEX",
-    "ARCA",
-    "BATS",
-    "IEXG",
+    "NYSE", "NASDAQ", "NASDAQOM", "NASDAQGS", "NASDAQCM", "NASDAQGM",
+    "NYSEARCA", "NYSEAMERICAN", "AMEX", "ARCA", "BATS", "IEXG",
 }
 
 
@@ -51,18 +39,34 @@ def _manuales(config_module):
     return result
 
 
+def _es_accion_us_tradable(asset):
+    symbol = _text(getattr(asset, "symbol", ""))
+    if not symbol or "/" in symbol:
+        return False
+    if not bool(getattr(asset, "tradable", False)):
+        return False
+    status = _text(getattr(asset, "status", ""))
+    if status and status not in {"ACTIVE", "ACTIVO"}:
+        return False
+    asset_class = _text(getattr(asset, "asset_class", ""))
+    if asset_class and asset_class != "US_EQUITY":
+        return False
+    exchange = _text(getattr(asset, "exchange", ""))
+    if exchange and exchange not in _EXCHANGES:
+        return False
+    return True
+
+
 def obtener_universo(broker_module, config_module):
-    """Devuelve el universo de acciones activo, negociable y acotado."""
+    """Devuelve TODAS las acciones US activas/tradables disponibles en Alpaca."""
     global _CACHE, _UPDATED
 
     manuales = _manuales(config_module)
-    enabled = bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True))
-    if not enabled:
+    if not bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True)):
         return manuales
 
     now = datetime.now(timezone.utc)
     refresh = max(1, int(getattr(config_module, "STOCK_UNIVERSE_REFRESH_MINUTES", 60)))
-    maximum = max(1, int(getattr(config_module, "STOCK_MAX_SYMBOLS_SCAN", 500)))
 
     with _LOCK:
         if _CACHE and _UPDATED and now - _UPDATED < timedelta(minutes=refresh):
@@ -70,41 +74,23 @@ def obtener_universo(broker_module, config_module):
         else:
             try:
                 assets = broker_module.cliente_trading.get_all_assets()
+                discovered = sorted({
+                    _text(getattr(asset, "symbol", ""))
+                    for asset in assets
+                    if _es_accion_us_tradable(asset)
+                })
+                _CACHE = list(discovered)
+                _UPDATED = now
+                log.info("[acciones] Universo completo actualizado: %s acciones negociables", len(discovered))
             except Exception as exc:
                 log.warning("[acciones] No se pudo actualizar universo: %s", exc)
                 discovered = list(_CACHE)
-            else:
-                candidates = []
-                for asset in assets:
-                    try:
-                        symbol = _text(getattr(asset, "symbol", ""))
-                        if not symbol or "/" in symbol:
-                            continue
-                        if not bool(getattr(asset, "tradable", False)):
-                            continue
-                        status = _text(getattr(asset, "status", ""))
-                        if status and status not in {"ACTIVE", "ACTIVO"}:
-                            continue
-                        asset_class = _text(getattr(asset, "asset_class", ""))
-                        if asset_class and asset_class != "US_EQUITY":
-                            continue
-                        exchange = _text(getattr(asset, "exchange", ""))
-                        if exchange and exchange not in _EXCHANGES:
-                            continue
-                        candidates.append(symbol)
-                    except Exception:
-                        continue
-
-                discovered = sorted(set(candidates))[:maximum]
-                _CACHE = list(discovered)
-                _UPDATED = now
-                log.info("[acciones] Universo actualizado: %s acciones negociables", len(discovered))
 
     ordered = []
     for ticker in manuales + discovered:
-        if ticker not in ordered:
+        if ticker and ticker not in ordered:
             ordered.append(ticker)
-    return ordered[: max(maximum, len(manuales))]
+    return ordered
 
 
 def _refrescar_loop(config_module, broker_module):
@@ -112,8 +98,6 @@ def _refrescar_loop(config_module, broker_module):
         try:
             universo = obtener_universo(broker_module, config_module)
             if universo:
-                # Sustitución atómica de la referencia: los loops existentes
-                # terminan su iteración sin mutaciones de la lista en curso.
                 config_module.TICKERS = universo
         except Exception as exc:
             log.debug("[acciones] Refresco automático omitido: %s", exc)
@@ -122,13 +106,13 @@ def _refrescar_loop(config_module, broker_module):
 
 
 def instalar(config_module, broker_module):
-    """Actualiza y mantiene el universo sin alterar la ejecución del bot."""
+    """Actualiza y mantiene el universo completo sin alterar la ejecución."""
     global _REFRESH_THREAD_STARTED
     try:
         universo = obtener_universo(broker_module, config_module)
         if universo:
             config_module.TICKERS = universo
-            log.info("[acciones] Monitor ampliado: %s símbolos", len(universo))
+            log.info("[acciones] Monitor ampliado a %s símbolos", len(universo))
 
         if not _REFRESH_THREAD_STARTED and bool(getattr(config_module, "STOCK_AUTO_UNIVERSE_ENABLED", True)):
             _REFRESH_THREAD_STARTED = True
