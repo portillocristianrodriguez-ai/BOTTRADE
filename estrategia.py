@@ -1,3 +1,6 @@
+```python
+import math
+
 import pandas as pd
 import ta
 
@@ -5,10 +8,81 @@ import config
 
 
 # ============================================================
+# UTILIDADES
+# ============================================================
+
+def _es_numero_valido(valor):
+    """
+    Devuelve True únicamente para números finitos y válidos.
+    """
+    try:
+        if valor is None:
+            return False
+
+        if pd.isna(valor):
+            return False
+
+        numero = float(valor)
+
+        return math.isfinite(numero)
+
+    except Exception:
+        return False
+
+
+def _config_float(nombre, default):
+    """
+    Obtiene un float de config de forma segura.
+    """
+    try:
+        valor = getattr(config, nombre, default)
+        valor = float(valor)
+
+        if not math.isfinite(valor):
+            return float(default)
+
+        return valor
+
+    except Exception:
+        return float(default)
+
+
+def _config_int(nombre, default):
+    """
+    Obtiene un entero de config de forma segura.
+    """
+    try:
+        valor = int(getattr(config, nombre, default))
+        return valor
+
+    except Exception:
+        return int(default)
+
+
+# ============================================================
 # INDICADORES
 # ============================================================
 
 def calcular_indicadores(df):
+    """
+    Calcula todos los indicadores utilizados por el bot.
+
+    Esta función intenta ser tolerante con datos incompletos:
+    - convierte columnas numéricas;
+    - elimina filas inválidas;
+    - evita divisiones por cero;
+    - deja NaN en indicadores que todavía no tienen suficientes
+      velas, en lugar de provocar excepciones.
+    """
+
+    if df is None:
+        return pd.DataFrame()
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df debe ser un pandas.DataFrame")
+
+    if df.empty:
+        return pd.DataFrame()
 
     df = df.copy()
 
@@ -20,35 +94,65 @@ def calcular_indicadores(df):
         "volume",
     ]
 
+    columnas_faltantes = [
+        columna
+        for columna in columnas_numericas
+        if columna not in df.columns
+    ]
+
+    if columnas_faltantes:
+        raise ValueError(
+            "Faltan columnas requeridas: "
+            + ", ".join(columnas_faltantes)
+        )
+
     for columna in columnas_numericas:
 
-        if columna in df.columns:
-
-            df[columna] = pd.to_numeric(
-                df[columna],
-                errors="coerce",
-            )
+        df[columna] = pd.to_numeric(
+            df[columna],
+            errors="coerce",
+        )
 
     df = df.dropna(
-        subset=[
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ]
+        subset=columnas_numericas
     )
 
+    if df.empty:
+        return df
+
     df = df.sort_index()
+
+    # ========================================================
+    # ELIMINAR PRECIOS INVÁLIDOS
+    # ========================================================
+
+    df = df[
+        (df["close"] > 0)
+        & (df["high"] > 0)
+        & (df["low"] > 0)
+        & (df["open"] > 0)
+        & (df["volume"] >= 0)
+    ]
+
+    if df.empty:
+        return df
 
     # ========================================================
     # EMA TENDENCIA
     # ========================================================
 
+    ema_tendencia_periodo = max(
+        2,
+        _config_int(
+            "EMA_TENDENCIA",
+            200,
+        ),
+    )
+
     df["ema_tendencia"] = (
         ta.trend.ema_indicator(
             df["close"],
-            window=config.EMA_TENDENCIA,
+            window=ema_tendencia_periodo,
         )
     )
 
@@ -56,30 +160,58 @@ def calcular_indicadores(df):
     # ATR
     # ========================================================
 
+    atr_periodo = max(
+        2,
+        _config_int(
+            "ATR_PERIODO",
+            14,
+        ),
+    )
+
     df["atr"] = (
         ta.volatility.average_true_range(
             df["high"],
             df["low"],
             df["close"],
-            window=config.ATR_PERIODO,
+            window=atr_periodo,
         )
     )
 
     # ========================================================
-    # EMAS
+    # EMA RAPIDA
     # ========================================================
+
+    ema_rapida_periodo = max(
+        2,
+        _config_int(
+            "EMA_RAPIDA",
+            9,
+        ),
+    )
 
     df["ema_rapida"] = (
         ta.trend.ema_indicator(
             df["close"],
-            window=config.EMA_RAPIDA,
+            window=ema_rapida_periodo,
         )
+    )
+
+    # ========================================================
+    # EMA LENTA
+    # ========================================================
+
+    ema_lenta_periodo = max(
+        2,
+        _config_int(
+            "EMA_LENTA",
+            21,
+        ),
     )
 
     df["ema_lenta"] = (
         ta.trend.ema_indicator(
             df["close"],
-            window=config.EMA_LENTA,
+            window=ema_lenta_periodo,
         )
     )
 
@@ -87,10 +219,18 @@ def calcular_indicadores(df):
     # RSI
     # ========================================================
 
+    rsi_periodo = max(
+        2,
+        _config_int(
+            "RSI_PERIODO",
+            14,
+        ),
+    )
+
     df["rsi"] = (
         ta.momentum.rsi(
             df["close"],
-            window=config.RSI_PERIODO,
+            window=rsi_periodo,
         )
     )
 
@@ -122,8 +262,9 @@ def calcular_indicadores(df):
 
     periodo_volumen = max(
         5,
-        int(
-            config.VOLUMEN_SMA_PERIODO
+        _config_int(
+            "VOLUMEN_SMA_PERIODO",
+            20,
         ),
     )
 
@@ -143,9 +284,8 @@ def calcular_indicadores(df):
 
     denominador = (
         df["volumen_media"]
-        .replace(
-            0,
-            pd.NA,
+        .where(
+            df["volumen_media"] > 0
         )
     )
 
@@ -162,9 +302,38 @@ def calcular_indicadores(df):
     )
 
     df["volumen_valido"] = (
-        df["volume"]
-        > 0
+        df["volume"] > 0
     )
+
+    # ========================================================
+    # LIMPIEZA FINAL DE INFINITOS
+    # ========================================================
+
+    columnas_indicadores = [
+        "ema_tendencia",
+        "atr",
+        "ema_rapida",
+        "ema_lenta",
+        "rsi",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "volumen_ratio",
+    ]
+
+    for columna in columnas_indicadores:
+
+        if columna in df.columns:
+
+            df[columna] = df[columna].replace(
+                [float("inf"), float("-inf")],
+                pd.NA,
+            )
+
+            df[columna] = pd.to_numeric(
+                df[columna],
+                errors="coerce",
+            )
 
     return df
 
@@ -177,15 +346,26 @@ def _datos_validos(
     actual,
     columnas,
 ):
+    """
+    Comprueba que las columnas requeridas contienen
+    números finitos.
+    """
+
+    if actual is None:
+        return False
 
     for columna in columnas:
 
-        valor = actual.get(
-            columna
-        )
+        try:
+            valor = actual.get(
+                columna
+            )
+        except Exception:
+            return False
 
-        if pd.isna(valor):
-
+        if not _es_numero_valido(
+            valor
+        ):
             return False
 
     return True
@@ -198,15 +378,21 @@ def _datos_validos(
 def _obtener_indice_barra_crypto(
     df,
 ):
+    """
+    Obtiene la última posición cuyo volumen es > 0.
+
+    Importante:
+    Una vela con volumen 0 no se considera un error.
+    Simplemente no se utiliza como vela activa para el
+    cálculo de la señal crypto.
+    """
 
     try:
 
         if df is None or df.empty:
-
             return None
 
         if "volume" not in df.columns:
-
             return None
 
         volumen = pd.to_numeric(
@@ -221,7 +407,6 @@ def _obtener_indice_barra_crypto(
         )
 
         if len(indices_validos) == 0:
-
             return None
 
         ultimo_indice = (
@@ -238,7 +423,6 @@ def _obtener_indice_barra_crypto(
             len(posiciones) == 0
             or posiciones[0] < 0
         ):
-
             return None
 
         return int(
@@ -246,7 +430,6 @@ def _obtener_indice_barra_crypto(
         )
 
     except Exception:
-
         return None
 
 
@@ -258,20 +441,30 @@ def _generar_senal_acciones(
     df,
 ):
 
+    ema_tendencia_periodo = max(
+        2,
+        _config_int(
+            "EMA_TENDENCIA",
+            200,
+        ),
+    )
+
     minimo_velas = (
-        config.EMA_TENDENCIA
+        ema_tendencia_periodo
         + 2
     )
 
-    if len(df) < minimo_velas:
+    if df is None or df.empty:
+        return "ESPERAR"
 
+    if len(df) < minimo_velas:
         return "ESPERAR"
 
     actual = df.iloc[-1]
-
     anterior = df.iloc[-2]
 
     columnas = [
+        "close",
         "ema_tendencia",
         "ema_rapida",
         "ema_lenta",
@@ -286,7 +479,6 @@ def _generar_senal_acciones(
         actual,
         columnas,
     ):
-
         return "ESPERAR"
 
     if not _datos_validos(
@@ -300,7 +492,17 @@ def _generar_senal_acciones(
             "macd_signal",
         ],
     ):
+        return "ESPERAR"
 
+    precio = float(
+        actual["close"]
+    )
+
+    atr = float(
+        actual["atr"]
+    )
+
+    if precio <= 0 or atr <= 0:
         return "ESPERAR"
 
     tendencia_alcista = (
@@ -353,25 +555,45 @@ def _generar_senal_acciones(
         actual["rsi"]
     )
 
+    rsi_sobreventa = _config_float(
+        "RSI_SOBREVENTA",
+        30,
+    )
+
+    rsi_sobrecompra = _config_float(
+        "RSI_SOBRECOMPRA",
+        70,
+    )
+
     rsi_alcista = (
-        config.RSI_SOBREVENTA
+        rsi_sobreventa
         <= rsi
-        <= config.RSI_SOBRECOMPRA
+        <= rsi_sobrecompra
+    )
+
+    volumen_min = _config_float(
+        "VOLUMEN_MIN_MULTIPLICADOR",
+        1.0,
     )
 
     volumen_ok = (
         actual["volumen_ratio"]
-        >= config.VOLUMEN_MIN_MULTIPLICADOR
+        >= volumen_min
+    )
+
+    atr_min_pct = _config_float(
+        "ATR_MIN_PCT",
+        0.003,
     )
 
     atr_pct = (
-        actual["atr"]
-        / actual["close"]
+        atr
+        / precio
     )
 
     volatilidad_ok = (
         atr_pct
-        >= config.ATR_MIN_PCT
+        >= atr_min_pct
     )
 
     compra_fuerte = (
@@ -396,11 +618,11 @@ def _generar_senal_acciones(
         compra_fuerte
         or compra_cruce
     ):
-
         return "COMPRAR"
 
-    margen = (
-        config.MARGEN_SALIDA_PCT
+    margen = _config_float(
+        "MARGEN_SALIDA_PCT",
+        0.05,
     )
 
     umbral_salida = (
@@ -431,7 +653,6 @@ def _generar_senal_acciones(
         or venta_ema
         or venta_fuerte
     ):
-
         return "VENDER"
 
     return "ESPERAR"
@@ -460,26 +681,32 @@ def analizar_impulso_acciones(
     try:
 
         if df is None or df.empty:
-
             return resultado
+
+        ema_tendencia_periodo = max(
+            2,
+            _config_int(
+                "EMA_TENDENCIA",
+                200,
+            ),
+        )
 
         minimo_velas = max(
             220,
-            config.EMA_TENDENCIA + 5,
+            ema_tendencia_periodo + 5,
         )
 
         if len(df) < minimo_velas:
-
             return resultado
 
-        datos = (
-            calcular_indicadores(
-                df
-            )
+        datos = calcular_indicadores(
+            df
         )
 
-        if len(datos) < minimo_velas:
+        if datos is None or datos.empty:
+            return resultado
 
+        if len(datos) < minimo_velas:
             return resultado
 
         indice_actual = (
@@ -511,7 +738,16 @@ def analizar_impulso_acciones(
             actual,
             columnas,
         ):
+            return resultado
 
+        if not _datos_validos(
+            anterior,
+            [
+                "ema_rapida",
+                "ema_lenta",
+                "macd_hist",
+            ],
+        ):
             return resultado
 
         precio = float(
@@ -519,7 +755,6 @@ def analizar_impulso_acciones(
         )
 
         if precio <= 0:
-
             return resultado
 
         # ====================================================
@@ -538,6 +773,14 @@ def analizar_impulso_acciones(
             actual["volumen_ratio"]
         )
 
+        if (
+            not math.isfinite(
+                volumen_ratio
+            )
+            or volumen_ratio < 0
+        ):
+            return resultado
+
         # ====================================================
         # ATR
         # ====================================================
@@ -545,6 +788,12 @@ def analizar_impulso_acciones(
         atr = float(
             actual["atr"]
         )
+
+        if (
+            not math.isfinite(atr)
+            or atr <= 0
+        ):
+            return resultado
 
         atr_pct = (
             atr
@@ -558,32 +807,31 @@ def analizar_impulso_acciones(
 
         momentum_bars = max(
             1,
-            int(
-                config.CRYPTO_MOMENTUM_BARS
+            _config_int(
+                "MOMENTUM_BARS",
+                _config_int(
+                    "CRYPTO_MOMENTUM_BARS",
+                    3,
+                ),
             ),
         )
 
-        if (
-            indice_actual
-            < momentum_bars
-        ):
-
+        if indice_actual < momentum_bars:
             return resultado
 
-        precio_anterior_momentum = (
-            float(
-                datos.iloc[
-                    indice_actual
-                    - momentum_bars
-                ]["close"]
-            )
+        precio_anterior_momentum = float(
+            datos.iloc[
+                indice_actual
+                - momentum_bars
+            ]["close"]
         )
 
         if (
-            precio_anterior_momentum
-            <= 0
+            not math.isfinite(
+                precio_anterior_momentum
+            )
+            or precio_anterior_momentum <= 0
         ):
-
             return resultado
 
         momentum_pct = (
@@ -600,21 +848,29 @@ def analizar_impulso_acciones(
 
         if indice_actual >= 3:
 
+            ema_actual = float(
+                actual["ema_rapida"]
+            )
+
             ema_3_barras = float(
                 datos.iloc[
                     indice_actual - 3
                 ]["ema_rapida"]
             )
 
-            if ema_3_barras > 0:
+            if (
+                math.isfinite(
+                    ema_actual
+                )
+                and math.isfinite(
+                    ema_3_barras
+                )
+                and ema_3_barras > 0
+            ):
 
                 ema_slope_pct = (
                     (
-                        float(
-                            actual[
-                                "ema_rapida"
-                            ]
-                        )
+                        ema_actual
                         - ema_3_barras
                     )
                     / ema_3_barras
@@ -634,36 +890,35 @@ def analizar_impulso_acciones(
 
         lookback = max(
             2,
-            int(
-                config.CRYPTO_BREAKOUT_LOOKBACK
+            _config_int(
+                "BREAKOUT_LOOKBACK",
+                _config_int(
+                    "CRYPTO_BREAKOUT_LOOKBACK",
+                    12,
+                ),
             ),
         )
 
-        if (
-            indice_actual
-            <= lookback
-        ):
-
+        if indice_actual <= lookback:
             return resultado
 
         ventana_previa = (
             datos.iloc[
-                indice_actual
-                - lookback:
+                indice_actual - lookback:
                 indice_actual
             ]
         )
 
+        if ventana_previa.empty:
+            return resultado
+
         maximo_previo = (
-            ventana_previa[
-                "high"
-            ].max()
+            ventana_previa["high"].max()
         )
 
-        if pd.isna(
+        if not _es_numero_valido(
             maximo_previo
         ):
-
             return resultado
 
         maximo_previo = float(
@@ -731,9 +986,14 @@ def analizar_impulso_acciones(
         # VOLUMEN
         # ====================================================
 
+        volumen_min = _config_float(
+            "VOLUMEN_MIN_MULTIPLICADOR",
+            1.0,
+        )
+
         volumen_fuerte = (
             volumen_ratio
-            >= config.VOLUMEN_MIN_MULTIPLICADOR
+            >= volumen_min
         )
 
         volumen_medio = (
@@ -745,9 +1005,17 @@ def analizar_impulso_acciones(
         # MOMENTUM
         # ====================================================
 
+        momentum_minimo_config = _config_float(
+            "MIN_MOMENTUM_PCT",
+            _config_float(
+                "CRYPTO_MIN_MOMENTUM_PCT",
+                0.30,
+            ),
+        )
+
         momentum_minimo = (
             momentum_pct
-            >= config.CRYPTO_MIN_MOMENTUM_PCT
+            >= momentum_minimo_config
         )
 
         momentum_positivo = (
@@ -755,14 +1023,18 @@ def analizar_impulso_acciones(
         )
 
         # ====================================================
-        # RSI PARA ACCIONES
-        #
-        # Más amplio que crypto.
-        # Evitamos comprar con RSI excesivamente alto.
+        # RSI
         # ====================================================
 
-        rsi_min_acciones = 50.0
-        rsi_max_acciones = 68.0
+        rsi_min_acciones = _config_float(
+            "RSI_MIN_ACCIONES",
+            50.0,
+        )
+
+        rsi_max_acciones = _config_float(
+            "RSI_MAX_ACCIONES",
+            68.0,
+        )
 
         rsi_en_zona = (
             rsi_min_acciones
@@ -774,10 +1046,15 @@ def analizar_impulso_acciones(
         # VOLATILIDAD
         # ====================================================
 
+        atr_min_config = _config_float(
+            "ATR_MIN_PCT",
+            0.003,
+        )
+
         volatilidad_ok = (
             atr_pct
             >= (
-                config.ATR_MIN_PCT
+                atr_min_config
                 * 100
             )
         )
@@ -786,9 +1063,17 @@ def analizar_impulso_acciones(
         # EVITAR MOVIMIENTO EXCESIVAMENTE EXTENDIDO
         # ====================================================
 
+        subida_maxima_config = _config_float(
+            "MAX_RISE_PCT",
+            _config_float(
+                "CRYPTO_MAX_RISE_PCT",
+                10.0,
+            ),
+        )
+
         subida_maxima = (
             momentum_pct
-            <= config.CRYPTO_MAX_RISE_PCT
+            <= subida_maxima_config
         )
 
         # ====================================================
@@ -799,10 +1084,6 @@ def analizar_impulso_acciones(
 
         motivos = []
 
-        # ----------------------------------------------------
-        # PRECIO SOBRE EMA 200
-        # ----------------------------------------------------
-
         if precio_sobre_tendencia:
 
             score += 10
@@ -810,10 +1091,6 @@ def analizar_impulso_acciones(
             motivos.append(
                 "precio > EMA tendencia"
             )
-
-        # ----------------------------------------------------
-        # EMA 9 > EMA 21
-        # ----------------------------------------------------
 
         if emas_alineadas:
 
@@ -823,10 +1100,6 @@ def analizar_impulso_acciones(
                 "EMA9 > EMA21"
             )
 
-        # ----------------------------------------------------
-        # EMA 9 ACELERANDO
-        # ----------------------------------------------------
-
         if slope_positivo:
 
             score += 10
@@ -835,10 +1108,6 @@ def analizar_impulso_acciones(
                 "EMA acelerando"
             )
 
-        # ----------------------------------------------------
-        # BREAKOUT
-        # ----------------------------------------------------
-
         if breakout:
 
             score += 20
@@ -846,10 +1115,6 @@ def analizar_impulso_acciones(
             motivos.append(
                 "breakout"
             )
-
-        # ----------------------------------------------------
-        # VOLUMEN
-        # ----------------------------------------------------
 
         if volumen_fuerte:
 
@@ -866,10 +1131,6 @@ def analizar_impulso_acciones(
             motivos.append(
                 "volumen creciente"
             )
-
-        # ----------------------------------------------------
-        # RSI
-        # ----------------------------------------------------
 
         if rsi_en_zona:
 
@@ -890,10 +1151,6 @@ def analizar_impulso_acciones(
                 "RSI elevado"
             )
 
-        # ----------------------------------------------------
-        # MACD POSITIVO
-        # ----------------------------------------------------
-
         if macd_hist_positivo:
 
             score += 5
@@ -902,10 +1159,6 @@ def analizar_impulso_acciones(
                 "MACD positivo"
             )
 
-        # ----------------------------------------------------
-        # MACD CRECIENDO
-        # ----------------------------------------------------
-
         if macd_hist_creciendo:
 
             score += 5
@@ -913,10 +1166,6 @@ def analizar_impulso_acciones(
             motivos.append(
                 "MACD creciendo"
             )
-
-        # ----------------------------------------------------
-        # MOMENTUM
-        # ----------------------------------------------------
 
         if momentum_minimo:
 
@@ -934,10 +1183,6 @@ def analizar_impulso_acciones(
                 "momentum positivo débil"
             )
 
-        # ----------------------------------------------------
-        # ATR
-        # ----------------------------------------------------
-
         if volatilidad_ok:
 
             score += 5
@@ -947,8 +1192,8 @@ def analizar_impulso_acciones(
             )
 
         score = min(
-            score,
-            100,
+            float(score),
+            100.0,
         )
 
         # ====================================================
@@ -967,8 +1212,7 @@ def analizar_impulso_acciones(
         )
 
         comprar = (
-            score
-            >= 75
+            score >= 75
             and filtros_duros
         )
 
@@ -1029,35 +1273,22 @@ def analizar_impulso_acciones(
         # ====================================================
 
         resultado = {
-            "score": float(
-                score
-            ),
-            "comprar": bool(
-                comprar
-            ),
+            "score": float(score),
+            "comprar": bool(comprar),
             "motivo": motivos,
-            "rsi": float(
-                rsi
-            ),
-            "volumen_ratio": float(
-                volumen_ratio
-            ),
-            "momentum_pct": float(
-                momentum_pct
-            ),
-            "atr_pct": float(
-                atr_pct
-            ),
-            "breakout": bool(
-                breakout
-            ),
+            "rsi": float(rsi),
+            "volumen_ratio": float(volumen_ratio),
+            "momentum_pct": float(momentum_pct),
+            "atr_pct": float(atr_pct),
+            "breakout": bool(breakout),
         }
 
         # ====================================================
         # LOG
         # ====================================================
 
-        log_message = (
+        print(
+            f"[acciones scanner] "
             f"{ticker}: "
             f"score={score:.1f} "
             f"comprar={comprar} "
@@ -1068,19 +1299,17 @@ def analizar_impulso_acciones(
             f"breakout={breakout}"
         )
 
-        print(
-            f"[acciones scanner] "
-            f"{log_message}"
-        )
-
         return resultado
 
     except Exception as e:
 
+        # Este error NO debe propagarse al motor de trading.
+        # Se devuelve un resultado seguro.
         print(
             f"[acciones scanner] "
-            f"{ticker}: error analizando "
-            f"impulso: {e}"
+            f"{ticker}: ERROR CONTROLADO "
+            f"analizando impulso: "
+            f"{type(e).__name__}: {e}"
         )
 
         return resultado
@@ -1096,18 +1325,20 @@ def _generar_senal_cripto(
 
     minimo_velas = 50
 
-    if len(df) < minimo_velas:
-
+    if df is None or df.empty:
         return "ESPERAR"
 
-    datos = (
-        calcular_indicadores(
-            df
-        )
+    if len(df) < minimo_velas:
+        return "ESPERAR"
+
+    datos = calcular_indicadores(
+        df
     )
 
-    if len(datos) < minimo_velas:
+    if datos is None or datos.empty:
+        return "ESPERAR"
 
+    if len(datos) < minimo_velas:
         return "ESPERAR"
 
     indice_actual = (
@@ -1117,11 +1348,9 @@ def _generar_senal_cripto(
     )
 
     if indice_actual is None:
-
         return "ESPERAR"
 
     if indice_actual < 2:
-
         return "ESPERAR"
 
     actual = datos.iloc[
@@ -1133,6 +1362,7 @@ def _generar_senal_cripto(
     ]
 
     columnas = [
+        "close",
         "ema_tendencia",
         "ema_rapida",
         "ema_lenta",
@@ -1147,7 +1377,37 @@ def _generar_senal_cripto(
         actual,
         columnas,
     ):
+        return "ESPERAR"
 
+    if not _datos_validos(
+        anterior,
+        [
+            "ema_rapida",
+            "ema_lenta",
+            "macd",
+            "macd_signal",
+        ],
+    ):
+        return "ESPERAR"
+
+    precio = float(
+        actual["close"]
+    )
+
+    atr = float(
+        actual["atr"]
+    )
+
+    if (
+        not math.isfinite(precio)
+        or precio <= 0
+    ):
+        return "ESPERAR"
+
+    if (
+        not math.isfinite(atr)
+        or atr <= 0
+    ):
         return "ESPERAR"
 
     tendencia_alcista = (
@@ -1190,19 +1450,37 @@ def _generar_senal_cripto(
         <= 68
     )
 
-    volumen_ok = (
+    volumen_min = _config_float(
+        "VOLUMEN_MIN_MULTIPLICADOR",
+        1.0,
+    )
+
+    volumen_ratio = float(
         actual["volumen_ratio"]
-        >= config.VOLUMEN_MIN_MULTIPLICADOR
+    )
+
+    # Volumen 0 o inválido = no hay entrada.
+    volumen_ok = (
+        math.isfinite(
+            volumen_ratio
+        )
+        and volumen_ratio > 0
+        and volumen_ratio >= volumen_min
+    )
+
+    atr_min_pct = _config_float(
+        "ATR_MIN_PCT",
+        0.003,
     )
 
     atr_pct = (
-        actual["atr"]
-        / actual["close"]
+        atr
+        / precio
     )
 
     volatilidad_ok = (
         atr_pct
-        >= config.ATR_MIN_PCT
+        >= atr_min_pct
     )
 
     precio_sobre_ema = (
@@ -1241,7 +1519,6 @@ def _generar_senal_cripto(
         entrada_principal
         or entrada_cruce
     ):
-
         return "COMPRAR"
 
     cruce_ema_bajista = (
@@ -1267,7 +1544,6 @@ def _generar_senal_cripto(
         salida_tendencia
         or salida_momentum
     ):
-
         return "VENDER"
 
     return "ESPERAR"
@@ -1284,10 +1560,14 @@ def generar_senal(
 
     try:
 
-        if "/" in str(
-            ticker
-        ):
+        if df is None or df.empty:
+            return "ESPERAR"
 
+        ticker_str = str(
+            ticker
+        ).upper()
+
+        if "/" in ticker_str:
             return _generar_senal_cripto(
                 df
             )
@@ -1298,13 +1578,12 @@ def generar_senal(
 
     except Exception as e:
 
-        log_message = (
-            f"{ticker}: error generando "
-            f"señal: {e}"
-        )
-
         print(
-            log_message
+            f"[estrategia] "
+            f"{ticker}: ERROR CONTROLADO "
+            f"generando señal: "
+            f"{type(e).__name__}: {e}"
         )
 
         return "ESPERAR"
+```
