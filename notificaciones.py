@@ -176,13 +176,15 @@ def _loop_comandos(callback):
                 )
 
                 log.error(
-                    "[Telegram] Los comandos NO podrán recibirse "
-                    "hasta que exista una sola instancia "
-                    "escuchando los mensajes."
+                    "[Telegram] Se detiene este listener para "
+                    "evitar reintentos infinitos. Debe existir "
+                    "una sola instancia de getUpdates."
                 )
 
-                time.sleep(10)
-                continue
+                # Telegram solo permite un receptor mediante
+                # getUpdates. Reintentar cada pocos segundos no
+                # resuelve el conflicto y genera ruido innecesario.
+                return
 
             # ====================================================
             # OTROS ERRORES HTTP
@@ -220,10 +222,6 @@ def _loop_comandos(callback):
                 [],
             ):
 
-                # ====================================================
-                # ACTUALIZAR OFFSET
-                # ====================================================
-
                 offset = (
                     update["update_id"]
                     + 1
@@ -235,10 +233,6 @@ def _loop_comandos(callback):
 
                 if not mensaje:
                     continue
-
-                # ====================================================
-                # OBTENER CHAT
-                # ====================================================
 
                 chat = mensaje.get(
                     "chat",
@@ -252,10 +246,6 @@ def _loop_comandos(callback):
                     )
                 )
 
-                # ====================================================
-                # SEGURIDAD
-                # ====================================================
-
                 if chat_id != str(
                     config.TELEGRAM_CHAT_ID
                 ):
@@ -268,10 +258,6 @@ def _loop_comandos(callback):
 
                     continue
 
-                # ====================================================
-                # OBTENER TEXTO
-                # ====================================================
-
                 texto = str(
                     mensaje.get(
                         "text",
@@ -282,16 +268,8 @@ def _loop_comandos(callback):
                 if not texto:
                     continue
 
-                # ====================================================
-                # SOLO COMANDOS
-                # ====================================================
-
                 if not texto.startswith("/"):
                     continue
-
-                # ====================================================
-                # EXTRAER COMANDO
-                # ====================================================
 
                 comando = (
                     texto
@@ -299,10 +277,6 @@ def _loop_comandos(callback):
                     .lower()
                 )
 
-                # Permite comandos tipo:
-                #
-                # /saldo@MiBot
-                #
                 if "@" in comando:
                     comando = comando.split(
                         "@"
@@ -313,10 +287,6 @@ def _loop_comandos(callback):
                     f"Comando recibido: "
                     f"{comando}"
                 )
-
-                # ====================================================
-                # EJECUTAR COMANDO
-                # ====================================================
 
                 try:
 
@@ -351,19 +321,8 @@ def _loop_comandos(callback):
                         f"{comando}."
                     )
 
-        # ========================================================
-        # TIMEOUT NORMAL
-        # ========================================================
-
         except requests.exceptions.Timeout:
-
-            # El timeout es normal porque estamos utilizando
-            # long polling con getUpdates.
             continue
-
-        # ========================================================
-        # ERROR DE CONEXIÓN
-        # ========================================================
 
         except requests.exceptions.RequestException as e:
 
@@ -374,10 +333,6 @@ def _loop_comandos(callback):
             )
 
             time.sleep(5)
-
-        # ========================================================
-        # ERROR GENERAL
-        # ========================================================
 
         except Exception as e:
 
