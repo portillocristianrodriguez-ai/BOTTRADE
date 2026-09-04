@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Any
+from typing import Any, Callable, Optional
 
 
 _RETRYABLE_FINAL_STATUSES = {
@@ -22,7 +22,7 @@ def crear_client_order_id(
     notional: Any = "",
     operation_bucket_seconds: int = 300,
 ) -> str:
-    """Genera un ID estable para la misma operación dentro de una ventana."""
+    """Genera un client_order_id estable dentro de una ventana temporal."""
     symbol = str(ticker or "ORDER").upper().replace("/", "")
     bucket_size = max(1, int(operation_bucket_seconds))
     bucket = int(time.time() // bucket_size)
@@ -55,7 +55,7 @@ def estado_no_reintentable(order: Any) -> bool:
 
 
 def preparar_client_order_id(order_data: Any, operation_bucket_seconds: int = 300) -> str:
-    """Asigna un client_order_id estable al objeto de orden y lo devuelve."""
+    """Obtiene el ID existente o genera uno estable para la operación."""
     existente = getattr(order_data, "client_order_id", None)
     if existente:
         return str(existente)
@@ -79,12 +79,16 @@ def aplicar_client_order_id(order_data: Any, client_order_id: str):
         return type(order_data)(**dumped)
 
 
-def submit_order_idempotente(cliente: Any, order_data: Any):
-    """Envía una orden sin duplicarla si el resultado del submit es incierto.
+def submit_order_idempotente(
+    cliente: Any,
+    order_data: Any,
+    submit_callable: Optional[Callable[..., Any]] = None,
+):
+    """Envía una orden sin reenvío ciego cuando el resultado es incierto.
 
-    Antes del envío se consulta el client_order_id. Si el submit lanza una
-    excepción, se vuelve a consultar ese mismo ID antes de considerar fallido
-    el intento. Así un timeout o error de red no provoca un reenvío ciego.
+    ``submit_callable`` permite usar esta función desde una capa que envuelve
+    ``cliente.submit_order`` sin provocar recursión. Si no se proporciona,
+    utiliza el método actual del cliente.
     """
     client_order_id = preparar_client_order_id(order_data)
     order_data = aplicar_client_order_id(order_data, client_order_id)
@@ -93,8 +97,9 @@ def submit_order_idempotente(cliente: Any, order_data: Any):
     if existente is not None and estado_no_reintentable(existente):
         return existente
 
+    submit = submit_callable or cliente.submit_order
     try:
-        return cliente.submit_order(order_data=order_data)
+        return submit(order_data=order_data)
     except Exception:
         reconciliada = buscar_orden_por_client_id(cliente, client_order_id)
         if reconciliada is not None and estado_no_reintentable(reconciliada):
