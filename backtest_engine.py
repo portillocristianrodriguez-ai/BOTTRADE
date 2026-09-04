@@ -49,11 +49,40 @@ def _max_drawdown(equity: pd.Series) -> float:
     return float(dd.min()) if len(dd) else 0.0
 
 
+def _infer_periods_per_year(index: pd.DatetimeIndex) -> float:
+    """Estima frecuencia de las velas para no falsear Sharpe/Sortino."""
+    if len(index) < 3:
+        return 252.0
+    deltas = pd.Series(index[1:] - index[:-1]).dt.total_seconds().dropna()
+    if deltas.empty:
+        return 252.0
+    median_seconds = float(deltas.median())
+    if median_seconds <= 0:
+        return 252.0
+    # 365 días para 24/7; 252 sesiones para datos diarios/intraday bursátiles.
+    if median_seconds <= 2 * 3600:
+        return 365.0 * 24.0 * 3600.0 / median_seconds
+    if median_seconds <= 26 * 3600:
+        return 252.0
+    return 252.0 * (86400.0 * 7.0 / median_seconds)
+
+
 def _sharpe(returns: pd.Series, periods: float) -> float:
     r = returns.dropna()
     if len(r) < 2 or float(r.std(ddof=1)) == 0:
         return 0.0
     return float(r.mean() / r.std(ddof=1) * math.sqrt(periods))
+
+
+def _sortino(returns: pd.Series, periods: float) -> float:
+    r = returns.dropna()
+    if len(r) < 2:
+        return 0.0
+    downside = r[r < 0]
+    if len(downside) == 0:
+        return float("inf") if r.mean() > 0 else 0.0
+    downside_dev = float(np.sqrt((downside ** 2).mean()))
+    return float(r.mean() / downside_dev * math.sqrt(periods)) if downside_dev else 0.0
 
 
 def resumen(trades: list[Trade], equity: pd.Series, initial_cash: float) -> dict:
@@ -64,11 +93,19 @@ def resumen(trades: list[Trade], equity: pd.Series, initial_cash: float) -> dict
     gross_loss = float(-losses.sum()) if len(losses) else 0.0
     profit_factor = gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit else 0.0)
     total_return = float(equity.iloc[-1] / initial_cash - 1.0) if len(equity) else 0.0
+    periods = _infer_periods_per_year(equity.index) if isinstance(equity.index, pd.DatetimeIndex) else 252.0
+    returns = equity.pct_change()
+    years = ((equity.index[-1] - equity.index[0]).total_seconds() / (365.25 * 86400.0)) if len(equity) > 1 and isinstance(equity.index, pd.DatetimeIndex) else 0.0
+    cagr = ((float(equity.iloc[-1]) / initial_cash) ** (1.0 / years) - 1.0) if years > 0 and equity.iloc[-1] > 0 else 0.0
+    max_dd = _max_drawdown(equity)
+    calmar = cagr / abs(max_dd) if max_dd < 0 else (float("inf") if cagr > 0 else 0.0)
     return {
         "initial_cash": float(initial_cash),
         "final_equity": float(equity.iloc[-1]) if len(equity) else float(initial_cash),
         "total_return_pct": total_return * 100.0,
-        "max_drawdown_pct": _max_drawdown(equity) * 100.0,
+        "cagr_pct": cagr * 100.0,
+        "max_drawdown_pct": max_dd * 100.0,
+        "calmar": float(calmar),
         "trades": len(trades),
         "wins": int(len(wins)),
         "losses": int(len(losses)),
@@ -77,7 +114,9 @@ def resumen(trades: list[Trade], equity: pd.Series, initial_cash: float) -> dict
         "expectancy_per_trade": float(pnl.mean()) if len(pnl) else 0.0,
         "best_trade_pct": float(max((t.return_pct for t in trades), default=0.0)),
         "worst_trade_pct": float(min((t.return_pct for t in trades), default=0.0)),
-        "sharpe_annualized": _sharpe(equity.pct_change(), 252.0),
+        "sharpe_annualized": _sharpe(returns, periods),
+        "sortino_annualized": _sortino(returns, periods),
+        "periods_per_year": float(periods),
     }
 
 
@@ -129,7 +168,6 @@ def run(
             stop = max(stop, position["trail"])
             reason = None
             exit_price = None
-            # Conservador: si stop y TP aparecen en la misma vela, gana el stop.
             if float(row["low"]) <= stop:
                 reason, exit_price = "stop", stop
             elif float(row["high"]) >= target:
@@ -152,7 +190,6 @@ def run(
                 position = None
                 mark = cash
 
-        # Señal al cierre -> entrada en la siguiente vela.
         if position is None and i < len(data) - 1:
             try:
                 sig = signal_fn(data.iloc[: i + 1])
