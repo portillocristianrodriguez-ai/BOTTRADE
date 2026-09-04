@@ -18,7 +18,6 @@ _REGIME_CACHE = {"ts": 0.0, "data": None}
 
 
 def _disable_secondary_account(broker_module):
-    """Keep the secondary account strictly read-only/inactive for execution."""
     if hasattr(broker_module, "cliente_trading_secundaria"):
         broker_module.cliente_trading_secundaria = None
 
@@ -54,16 +53,13 @@ def _execution_quality_notional(broker_module, ticker, proposed):
         )
         broker_module.log.info(
             f"[EXEC] {ticker}: spread={quality.get('spread_pct')}% "
-            f"top_depth=${quality.get('top_ask_depth_usd')} "
-            f"ratio={quality.get('depth_ratio')} "
-            f"impact={quality.get('estimated_impact_pct')} "
-            f"reason={quality.get('reason')}"
+            f"top_depth=${quality.get('top_ask_depth_usd')} ratio={quality.get('depth_ratio')} "
+            f"impact={quality.get('estimated_impact_pct')} reason={quality.get('reason')}"
         )
         if not quality.get("ok", True):
             return 0.0, str(quality.get("reason", "blocked"))
         recommended = float(quality.get("recommended_notional", proposed) or proposed)
-        recommended = max(0.0, min(proposed, recommended))
-        return recommended, str(quality.get("reason", "ok"))
+        return max(0.0, min(proposed, recommended)), str(quality.get("reason", "ok"))
     except Exception as exc:
         broker_module.log.warning(f"[EXEC] {ticker}: control de calidad no disponible: {exc}")
         return proposed, "unavailable"
@@ -116,7 +112,7 @@ def _install_broker(broker_module):
                     razon_txt = ""
                 ajustada = round(ajustada, 6)
             else:
-                ajustada = int(ajustada)
+                ajustada = max(1, int(ajustada))
                 razon_txt = ""
 
             if ajustada <= 0:
@@ -192,6 +188,12 @@ def _install_broker(broker_module):
             return False
 
     def guarded_submit(order_data=None, *args, **kwargs):
+        if order_data is None and args:
+            order_data = args[0]
+        if order_data is None:
+            order_data = kwargs.get("order_data")
+        if order_data is None:
+            raise ValueError("submit_order requiere order_data")
         import execution_idempotency
         return execution_idempotency.submit_order_idempotente(
             client,
