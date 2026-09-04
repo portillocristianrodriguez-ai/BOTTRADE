@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import functools
 import logging
+import threading
+import time
 
 import pandas as pd
 
@@ -16,13 +18,14 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 DEFAULT_MIN_BARS = 50
+_WARNING_INTERVAL_SECONDS = 15 * 60
+_warning_lock = threading.Lock()
+_last_warning: dict[str, float] = {}
 
 
 def _min_bars(config_module=None) -> int:
     cfg = config_module
     try:
-        # La estrategia de impulso actual necesita 50 barras como mínimo.
-        # Permitimos elevar el umbral por configuración, nunca reducirlo.
         configured = int(getattr(cfg, "STRATEGY_MIN_BARS", DEFAULT_MIN_BARS)) if cfg is not None else DEFAULT_MIN_BARS
     except (TypeError, ValueError):
         configured = DEFAULT_MIN_BARS
@@ -31,6 +34,23 @@ def _min_bars(config_module=None) -> int:
 
 def _es_dataframe_valido(df, minimo: int) -> bool:
     return isinstance(df, pd.DataFrame) and not df.empty and len(df) >= minimo
+
+
+def _avisar_historial_insuficiente(ticker, actual: int, minimo: int) -> None:
+    """Evita inundar los logs cuando el universo contiene símbolos sin histórico."""
+    clave = str(ticker)
+    ahora = time.monotonic()
+    with _warning_lock:
+        ultimo = _last_warning.get(clave, 0.0)
+        if ahora - ultimo < _WARNING_INTERVAL_SECONDS:
+            return
+        _last_warning[clave] = ahora
+    log.warning(
+        "[datos] %s: historial insuficiente (%d/%d barras); se omite evaluación.",
+        ticker,
+        actual,
+        minimo,
+    )
 
 
 def instalar(main_module) -> None:
@@ -52,18 +72,12 @@ def instalar(main_module) -> None:
             if df is None or getattr(df, "empty", True):
                 return pd.DataFrame()
             if len(df) < minimo:
-                log.warning(
-                    "[datos] %s: historial insuficiente (%d/%d barras); se omite evaluación.",
-                    ticker,
-                    len(df),
-                    minimo,
-                )
+                _avisar_historial_insuficiente(ticker, len(df), minimo)
                 return pd.DataFrame()
             return df
         except Exception:
-            # Mantener la semántica existente de broker.obtener_datos:
-            # los fallos de datos no deben propagarse al scanner.
             return pd.DataFrame()
 
     obtener_datos_seguro._bottrade_data_quality = True
     broker_module.obtener_datos = obtener_datos_seguro
+    log.info("[datos] Calidad de histórico endurecida; avisos limitados por símbolo.")
