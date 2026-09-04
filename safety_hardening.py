@@ -27,7 +27,10 @@ def instalar(main_module):
             if comando == "/crypto":
                 return _resumen_crypto(main_module)
             if comando in ("/help", "/start"):
-                return original_callback(comando) + "\n\n🌐 UNIVERSOS\n/universo — acciones + crypto\n/acciones — universo completo de acciones\n/crypto — universo completo de crypto"
+                base = original_callback(comando) or ""
+                extra = "🌐 UNIVERSOS\n/universo — acciones + crypto\n/acciones — universo completo de acciones\n/stocks — alias de /acciones\n/crypto — universo completo de crypto"
+                return f"{base}\n\n{extra}" if base else extra
+            # Todos los comandos existentes pasan intactos al callback original.
             return original_callback(comando)
         main_module.procesar_comando_telegram = callback_con_universos
     threading.Thread(target=_watchdog_proteccion_universal, args=(main_module,), daemon=True, name="WatchdogProteccionUniversal").start()
