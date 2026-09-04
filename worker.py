@@ -1,6 +1,7 @@
 """Entrypoint de producción para BOTTRADE."""
 from __future__ import annotations
 
+import math
 import threading
 
 import estrategia
@@ -11,6 +12,39 @@ from execution_stream import lanzar_stream_ejecuciones
 _PATTERN_CONTEXT = threading.local()
 _PATTERN_RUNTIME_LOCK = threading.RLock()
 _SIGNAL_CONTEXT = threading.local()
+
+
+def _numero_finito(value):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _observacion_valida_crypto(df):
+    """Evita guardar observaciones crypto con indicadores todavía no calculados."""
+    if df is None or getattr(df, "empty", True):
+        return False, "sin_datos"
+    try:
+        row = df.iloc[-1]
+        precio = _numero_finito(row.get("close"))
+        atr = _numero_finito(row.get("atr"))
+        rsi = _numero_finito(row.get("rsi"))
+        ema_rapida = _numero_finito(row.get("ema_rapida"))
+        ema_lenta = _numero_finito(row.get("ema_lenta"))
+        ema_tendencia = _numero_finito(row.get("ema_tendencia"))
+        if precio is None or precio <= 0:
+            return False, "precio_invalido"
+        if atr is None or atr <= 0:
+            return False, "atr_no_disponible"
+        if rsi is None or not 0 <= rsi <= 100:
+            return False, "rsi_no_disponible"
+        if any(value is None for value in (ema_rapida, ema_lenta, ema_tendencia)):
+            return False, "ema_no_disponible"
+        return True, "ok"
+    except Exception:
+        return False, "indicadores_invalidos"
 
 
 def _instalar_observacion_robusta(main_module):
@@ -39,6 +73,12 @@ def _instalar_observacion_robusta(main_module):
                 df_observacion = estrategia.calcular_indicadores(df)
         except Exception as exc:
             main_module.log.warning("[patrones] %s: indicadores no disponibles: %s", ticker, exc)
+
+        if es_crypto:
+            valido, razon = _observacion_valida_crypto(df_observacion)
+            if not valido:
+                main_module.log.debug("[patrones] %s: observación crypto omitida (%s)", ticker, razon)
+                return
 
         anterior = getattr(_PATTERN_CONTEXT, "crypto_24_7", False)
         _PATTERN_CONTEXT.crypto_24_7 = es_crypto
@@ -123,9 +163,7 @@ def _instalar_sizing_por_score(main_module):
             if callable(normalizar):
                 adjusted = normalizar(ticker, adjusted)
             if adjusted > 0 and abs(factor - 1.0) >= 0.02:
-                broker_module.log.info(
-                    f"[SIZING-SCORE] {ticker}: score={score:.1f} factor={factor:.3f} qty={qty}->{adjusted}"
-                )
+                broker_module.log.info(f"[SIZING-SCORE] {ticker}: score={score:.1f} factor={factor:.3f} qty={qty}->{adjusted}")
             return adjusted
         except Exception as exc:
             broker_module.log.warning(f"[SIZING-SCORE] {ticker}: ajuste omitido: {exc}")
