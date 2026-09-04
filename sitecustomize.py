@@ -179,7 +179,9 @@ def _obtener_regimen_global(broker_module):
     try:
         import market_regime
         datos = broker_module.obtener_datos_crypto_lote(["BTC/USD"], dias=3)
-        btc = datos.get("BTC/USD") or datos.get("BTCUSD")
+        btc = datos.get("BTC/USD")
+        if btc is None:
+            btc = datos.get("BTCUSD")
         regime = market_regime.evaluar_regimen_btc(btc)
         _REGIME_CACHE["ts"] = now
         _REGIME_CACHE["data"] = regime
@@ -260,9 +262,6 @@ def _install_strategy(strategy_module):
             result["market_regime_score"] = regime_score
             result["market_regime_adjustment"] = regime_adjustment
 
-            # En régimen bajista no apagamos todo el scanner: reducimos la
-            # frecuencia de entradas débiles, conservando oportunidades muy
-            # fuertes para el perfil agresivo-controlado.
             hard_block_bear = regime_name == "bajista" and raw < 84.0
             if hard_block_bear:
                 result["comprar"] = False
