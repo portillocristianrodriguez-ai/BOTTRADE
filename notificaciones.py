@@ -13,6 +13,10 @@ import config
 
 log = logging.getLogger(__name__)
 
+# Solo puede existir un listener de getUpdates por proceso.
+_comandos_lock = threading.Lock()
+_comandos_iniciado = False
+
 
 # ============================================================
 # ENVIAR NOTIFICACIÓN
@@ -97,9 +101,31 @@ def notificar(mensaje: str):
 
 def iniciar_comandos(callback):
     """
-    Inicia un hilo independiente que escucha comandos
-    enviados por Telegram.
+    Inicia un único hilo independiente que escucha comandos
+    enviados por Telegram. Las llamadas duplicadas dentro del
+    mismo proceso se ignoran para evitar dos receptores.
     """
+    global _comandos_iniciado
+
+    with _comandos_lock:
+        if _comandos_iniciado:
+            log.warning(
+                "[Telegram] El receptor de comandos ya está activo; "
+                "se ignora el segundo arranque."
+            )
+            return False
+
+        if (
+            not config.TELEGRAM_BOT_TOKEN
+            or not config.TELEGRAM_CHAT_ID
+        ):
+            log.warning(
+                "[Telegram] No se inicia el receptor: "
+                "Token o Chat ID no configurados."
+            )
+            return False
+
+        _comandos_iniciado = True
 
     hilo = threading.Thread(
         target=_loop_comandos,
@@ -111,8 +137,11 @@ def iniciar_comandos(callback):
     hilo.start()
 
     log.info(
-        "[Telegram] Monitor de comandos iniciado."
+        "[Telegram] Monitor de comandos iniciado. "
+        "Receptor único activo."
     )
+
+    return True
 
 
 # ============================================================
@@ -151,17 +180,6 @@ def _loop_comandos(callback):
                 timeout=35,
             )
 
-            # ====================================================
-            # CONFLICTO 409
-            # ====================================================
-            #
-            # Telegram solo permite un receptor mediante
-            # getUpdates. Durante un redeploy de Railway puede
-            # existir solapamiento temporal entre la instancia
-            # anterior y la nueva. No matamos el listener ante
-            # el primer 409: esperamos y recuperamos el polling.
-            # ====================================================
-
             if respuesta.status_code == 409:
 
                 conflictos_409 += 1
@@ -181,9 +199,6 @@ def _loop_comandos(callback):
                 time.sleep(espera)
                 continue
 
-            # Cualquier respuesta correcta rompe la racha de
-            # conflictos y devuelve el listener a funcionamiento
-            # normal.
             conflictos_409 = 0
 
             if respuesta.status_code != 200:
