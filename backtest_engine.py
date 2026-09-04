@@ -59,7 +59,6 @@ def _infer_periods_per_year(index: pd.DatetimeIndex) -> float:
     median_seconds = float(deltas.median())
     if median_seconds <= 0:
         return 252.0
-    # 365 días para 24/7; 252 sesiones para datos diarios/intraday bursátiles.
     if median_seconds <= 2 * 3600:
         return 365.0 * 24.0 * 3600.0 / median_seconds
     if median_seconds <= 26 * 3600:
@@ -131,12 +130,7 @@ def run(
     slippage_bps: float = 0.0,
     signal_fn: Callable[[pd.DataFrame], str] | None = None,
 ) -> tuple[dict, pd.DataFrame, list[Trade]]:
-    """Ejecuta una simulación sin look-ahead.
-
-    La señal se calcula con todo el histórico disponible hasta la vela actual y
-    la entrada se hace en el open siguiente. El tamaño usa riesgo fijo sobre
-    stop, limitado por caja disponible.
-    """
+    """Ejecuta una simulación sin look-ahead."""
     data = _clean(df)
     if len(data) < int(config.EMA_TENDENCIA) + 5:
         raise ValueError("No hay suficientes barras para la EMA de tendencia.")
@@ -156,40 +150,36 @@ def run(
     for i in range(len(data)):
         row = data.iloc[i]
         price = float(row["close"])
-        mark = cash + (position["qty"] * price if position else 0.0)
 
         if position is not None:
-            entry = position["entry"]
-            stop = position["stop"]
-            target = position["target"]
             if price > position["peak"]:
                 position["peak"] = price
                 position["trail"] = max(position["trail"], price * (1.0 - trail))
-            stop = max(stop, position["trail"])
+            stop = max(position["stop"], position["trail"])
             reason = None
             exit_price = None
             if float(row["low"]) <= stop:
                 reason, exit_price = "stop", stop
-            elif float(row["high"]) >= target:
-                reason, exit_price = "take_profit", target
+            elif float(row["high"]) >= position["target"]:
+                reason, exit_price = "take_profit", position["target"]
             else:
-                window = data.iloc[: i + 1]
                 try:
-                    sig = signal_fn(window)
+                    sig = signal_fn(data.iloc[: i + 1])
                 except Exception:
                     sig = "ESPERAR"
                 if sig == "VENDER":
                     reason, exit_price = "signal", price
             if reason is not None:
                 exit_price *= 1.0 - slippage_bps / 10000.0
-                gross = position["qty"] * (exit_price - entry)
-                fees = (position["qty"] * entry + position["qty"] * exit_price) * fee_bps / 10000.0
+                gross = position["qty"] * (exit_price - position["entry"])
+                fees = (position["qty"] * position["entry"] + position["qty"] * exit_price) * fee_bps / 10000.0
                 pnl = gross - fees
-                trades.append(Trade(position["entry_time"], data.index[i], entry, exit_price, position["qty"], pnl, (exit_price / entry - 1.0) * 100.0, reason))
+                trades.append(Trade(position["entry_time"], data.index[i], position["entry"], exit_price, position["qty"], pnl, (exit_price / position["entry"] - 1.0) * 100.0, reason))
                 cash += position["qty"] * exit_price - fees
                 position = None
-                mark = cash
 
+        # La señal de la vela i solo puede abrir en i+1. La nueva posición no
+        # entra en equity hasta que llegue realmente su vela de entrada.
         if position is None and i < len(data) - 1:
             try:
                 sig = signal_fn(data.iloc[: i + 1])
@@ -207,7 +197,12 @@ def run(
                         cash -= total
                         position = {"entry_time": data.index[i + 1], "entry": next_open, "qty": qty, "stop": next_open * (1.0 - sl), "target": next_open * (1.0 + tp), "trail": next_open * (1.0 - trail), "peak": next_open}
 
-        mark = cash + (position["qty"] * price if position else 0.0)
+        if position is None:
+            mark = cash
+        elif data.index[i] < position["entry_time"]:
+            mark = cash
+        else:
+            mark = cash + position["qty"] * price
         equity_rows.append((data.index[i], mark))
 
     if position is not None:
