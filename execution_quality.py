@@ -29,18 +29,19 @@ def _level_price_size(level):
 def _vwap_impact(asks, notional, mid):
     remaining = max(0.0, _num(notional))
     cost = 0.0
-    filled_notional = 0.0
+    quantity = 0.0
     for level in asks[:10]:
         price, size = _level_price_size(level)
         if price <= 0 or size <= 0 or remaining <= 0:
             continue
         take_notional = min(size * price, remaining)
+        take_qty = take_notional / price
         cost += take_notional
-        filled_notional += take_notional
+        quantity += take_qty
         remaining -= take_notional
-    if filled_notional <= 0 or mid <= 0:
+    if quantity <= 0 or mid <= 0:
         return None, remaining
-    vwap = cost / (filled_notional / mid) if filled_notional > 0 else mid
+    vwap = cost / quantity
     impact_pct = (vwap / mid - 1.0) * 100.0
     return impact_pct, remaining
 
@@ -121,12 +122,9 @@ def evaluate_crypto_orderbook(
 
         impact_limit = max(0.10, spread_limit * 1.5)
         if unfilled > 0:
-            # If the top 10 levels cannot absorb the proposed order, use the
-            # same depth cap rather than pretending the full order is liquid.
             recommended = min(recommended, max(0.0, top_depth * max_ratio))
 
         if impact_pct is not None and impact_pct > impact_limit:
-            # Try a smaller executable size before hard-blocking.
             recommended = min(recommended, max(0.0, top_depth * max_ratio))
             if recommended < minimum:
                 result["ok"] = False
@@ -142,8 +140,8 @@ def evaluate_crypto_orderbook(
             return result
 
         result["recommended_notional"] = recommended
-        if recommended < proposed:
-            result["reason"] = result["reason"] if result["reason"] != "ok" else "reduced_for_depth"
+        if recommended < proposed and result["reason"] == "ok":
+            result["reason"] = "reduced_for_depth"
         return result
     except Exception as exc:
         result["reason"] = f"unavailable:{type(exc).__name__}"
