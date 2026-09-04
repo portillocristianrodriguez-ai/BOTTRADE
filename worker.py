@@ -1,9 +1,9 @@
 """Entrypoint de producción para BOTTRADE.
 
-Carga main y aplica una pequeña capa de compatibilidad al motor de
-observación de patrones antes de arrancar los hilos. El objetivo es que
-la observación crypto use indicadores reales y una sesión 24/7, sin
-convertirse en una fuente de errores del circuit breaker.
+Aplica una capa pequeña y acotada de compatibilidad al motor de observación
+antes de arrancar main. La observación crypto usa indicadores reales y una
+sesión 24/7; los fallos de observación no se contabilizan como fallos de
+trading para el circuit breaker.
 
 No modifica el modo PAPER ni habilita trading live.
 """
@@ -15,6 +15,7 @@ import estrategia
 
 
 _PATTERN_CONTEXT = threading.local()
+_PATTERN_RUNTIME_LOCK = threading.RLock()
 
 
 def _instalar_observacion_robusta(main_module):
@@ -58,15 +59,31 @@ def _instalar_observacion_robusta(main_module):
 
         anterior = getattr(_PATTERN_CONTEXT, "crypto_24_7", False)
         _PATTERN_CONTEXT.crypto_24_7 = es_crypto
-        try:
-            return original_observacion(
-                ticker,
-                df_observacion,
-                analisis_scanner,
-                senal,
+
+        # La observación es analítica y está explícitamente desactivada como
+        # fuente de trading. Un fallo al registrar una observación no debe
+        # consumir el presupuesto de errores del circuit breaker de ejecución.
+        original_error_operativo = getattr(main_module, "registrar_error_operativo", None)
+
+        def error_observacion_aislado(origen, error):
+            main_module.log.warning(
+                f"[patrones] {ticker}: fallo de observación aislado: {error}"
             )
-        finally:
-            _PATTERN_CONTEXT.crypto_24_7 = anterior
+
+        with _PATTERN_RUNTIME_LOCK:
+            if callable(original_error_operativo):
+                main_module.registrar_error_operativo = error_observacion_aislado
+            try:
+                return original_observacion(
+                    ticker,
+                    df_observacion,
+                    analisis_scanner,
+                    senal,
+                )
+            finally:
+                if callable(original_error_operativo):
+                    main_module.registrar_error_operativo = original_error_operativo
+                _PATTERN_CONTEXT.crypto_24_7 = anterior
 
     registrar_observacion_pattern._bottrade_hardened = True
     main_module.registrar_observacion_pattern = registrar_observacion_pattern
