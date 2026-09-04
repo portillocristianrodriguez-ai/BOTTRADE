@@ -60,6 +60,84 @@ def _obtener_indice_barra_crypto(df):
         return None
 
 
+def _confirmacion_multitimeframe(df, indice=None):
+    """Evalúa estructura de 15m y 1h sin contaminar la señal con el futuro."""
+    salida = {
+        "tf15_alcista": False,
+        "tf1h_alcista": False,
+        "tf15_fuerte": False,
+        "tf1h_fuerte": False,
+        "confirmacion": 0.0,
+        "alineacion": "neutral",
+    }
+    try:
+        if df is None or len(df) < 80:
+            return salida
+        base = df[["open", "high", "low", "close", "volume"]].copy()
+        base = base.apply(pd.to_numeric, errors="coerce").dropna().sort_index()
+        if len(base) < 80:
+            return salida
+        if not isinstance(base.index, pd.DatetimeIndex):
+            return salida
+        if base.index.tz is None:
+            base.index = base.index.tz_localize("UTC")
+
+        if indice is not None and 0 <= int(indice) < len(base):
+            corte = base.index[int(indice)]
+            base = base.loc[:corte]
+
+        def evaluar(reglas, ema_rapida, ema_lenta):
+            if len(reglas) < max(ema_lenta + 3, 30):
+                return False, False
+            close = reglas["close"]
+            fast = close.ewm(span=ema_rapida, adjust=False).mean()
+            slow = close.ewm(span=ema_lenta, adjust=False).mean()
+            ultimo = float(close.iloc[-1])
+            f = float(fast.iloc[-1])
+            s = float(slow.iloc[-1])
+            if ultimo <= 0 or s <= 0:
+                return False, False
+            pendiente = (float(fast.iloc[-1]) - float(fast.iloc[-4])) / float(fast.iloc[-4]) * 100 if float(fast.iloc[-4]) > 0 else 0.0
+            alcista = ultimo > s and f > s
+            fuerte = alcista and pendiente > 0
+            return bool(alcista), bool(fuerte)
+
+        tf15 = base.resample("15min", label="right", closed="right").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna(subset=["close"])
+        tf1h = base.resample("1h", label="right", closed="right").agg({
+            "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+        }).dropna(subset=["close"])
+
+        salida["tf15_alcista"], salida["tf15_fuerte"] = evaluar(tf15, 8, 21)
+        salida["tf1h_alcista"], salida["tf1h_fuerte"] = evaluar(tf1h, 12, 24)
+
+        puntos = 0.0
+        if salida["tf15_alcista"]:
+            puntos += 4.0
+        if salida["tf15_fuerte"]:
+            puntos += 3.0
+        if salida["tf1h_alcista"]:
+            puntos += 4.0
+        if salida["tf1h_fuerte"]:
+            puntos += 3.0
+        if salida["tf15_alcista"] and salida["tf1h_alcista"]:
+            puntos += 2.0
+        salida["confirmacion"] = min(puntos, 16.0)
+
+        if salida["tf15_fuerte"] and salida["tf1h_fuerte"]:
+            salida["alineacion"] = "alcista_fuerte"
+        elif salida["tf15_alcista"] and salida["tf1h_alcista"]:
+            salida["alineacion"] = "alcista"
+        elif salida["tf15_alcista"] or salida["tf1h_alcista"]:
+            salida["alineacion"] = "mixta"
+        else:
+            salida["alineacion"] = "bajista"
+        return salida
+    except Exception:
+        return salida
+
+
 def _generar_senal_acciones(df):
     if len(df) < config.EMA_TENDENCIA + 2:
         return "ESPERAR"
@@ -96,46 +174,33 @@ def _generar_senal_acciones(df):
 
     continuacion = (
         tendencia_alcista and emas_alcistas and macd_alcista
-        and rsi_ok and volumen_ok and volatilidad_ok
-        and impulso > 0
+        and rsi_ok and volumen_ok and volatilidad_ok and impulso > 0
     )
-    ruptura_impulso = (
-        ruptura and tendencia_alcista and macd_alcista
-        and 48 <= rsi <= 74 and volatilidad_ok
-    )
+    ruptura_impulso = ruptura and tendencia_alcista and macd_alcista and 48 <= rsi <= 74 and volatilidad_ok
 
     if continuacion or ruptura_impulso or (
-        cruce_alcista and tendencia_alcista and macd_alcista
-        and rsi <= 72 and volatilidad_ok
+        cruce_alcista and tendencia_alcista and macd_alcista and rsi <= 72 and volatilidad_ok
     ):
         return "COMPRAR"
 
     if (
         actual["close"] < actual["ema_tendencia"] * (1 - config.MARGEN_SALIDA_PCT)
         and macd_bajista
-    ) or (
-        cruce_bajista and macd_bajista
-    ) or (
+    ) or (cruce_bajista and macd_bajista) or (
         tendencia_bajista and emas_bajistas and macd_bajista and rsi < 45
     ):
         return "VENDER"
-
     return "ESPERAR"
 
 
 def _resultado_vacio():
     return {
-        "score": 0.0,
-        "comprar": False,
-        "motivo": [],
-        "rsi": 0.0,
-        "volumen_ratio": 0.0,
-        "momentum_pct": 0.0,
-        "atr_pct": 0.0,
-        "breakout": False,
-        "regimen": "neutral",
-        "adx": 0.0,
-        "aceleracion_volumen": 0.0,
+        "score": 0.0, "comprar": False, "motivo": [], "rsi": 0.0,
+        "volumen_ratio": 0.0, "momentum_pct": 0.0, "atr_pct": 0.0,
+        "breakout": False, "regimen": "neutral", "adx": 0.0,
+        "aceleracion_volumen": 0.0, "tf15_alcista": False,
+        "tf1h_alcista": False, "tf15_fuerte": False, "tf1h_fuerte": False,
+        "mtf_confirmacion": 0.0, "mtf_alineacion": "neutral",
     }
 
 
@@ -144,7 +209,6 @@ def _analizar_impulso(df, ticker, es_crypto=False):
     try:
         if df is None or df.empty:
             return resultado
-
         datos = calcular_indicadores(df)
         if datos.empty:
             return resultado
@@ -161,10 +225,7 @@ def _analizar_impulso(df, ticker, es_crypto=False):
 
         actual = datos.iloc[i]
         anterior = datos.iloc[i - 1]
-        cols = [
-            "close", "high", "ema_tendencia", "ema_rapida", "ema_lenta",
-            "rsi", "macd_hist", "atr", "volumen_ratio", "adx",
-        ]
+        cols = ["close", "high", "ema_tendencia", "ema_rapida", "ema_lenta", "rsi", "macd_hist", "atr", "volumen_ratio", "adx"]
         if not _datos_validos(actual, cols):
             return resultado
 
@@ -187,7 +248,6 @@ def _analizar_impulso(df, ticker, es_crypto=False):
         ema_l = float(actual["ema_lenta"])
         hist = float(actual["macd_hist"])
         hist_prev = float(anterior["macd_hist"]) if not pd.isna(anterior["macd_hist"]) else hist
-
         sobre_tendencia = precio > ema_t
         emas = ema_f > ema_l
         slope_ref = float(datos.iloc[i - 3]["ema_rapida"])
@@ -203,11 +263,7 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             max_rise = float(getattr(config, "CRYPTO_MAX_RISE_PCT", 10.0))
         else:
             vol_min = float(getattr(config, "VOLUMEN_MIN_MULTIPLICADOR", 1.0))
-            rsi_min = 48.0
-            rsi_max = 74.0
-            mom_min = 0.10
-            score_min = 65.0
-            max_rise = 8.0
+            rsi_min, rsi_max, mom_min, score_min, max_rise = 48.0, 74.0, 0.10, 65.0, 8.0
 
         vol_ok = vol >= vol_min
         rsi_ok = rsi_min <= rsi <= rsi_max
@@ -225,6 +281,11 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             regimen = "transicion"
         else:
             regimen = "bajista"
+
+        mtf = _confirmacion_multitimeframe(df, i)
+        tf15_ok = mtf["tf15_alcista"]
+        tf1h_ok = mtf["tf1h_alcista"]
+        mtf_fuerte = mtf["tf15_fuerte"] and mtf["tf1h_fuerte"]
 
         score = 0.0
         motivos = []
@@ -245,62 +306,48 @@ def _analizar_impulso(df, ticker, es_crypto=False):
                 score += puntos
                 motivos.append(motivo)
 
-        # ADX y aceleración no dominan el score: sirven para distinguir una
-        # tendencia realmente negociable de una subida débil o sin participación.
         if adx_ok:
             score += 2.5
             motivos.append("ADX con tendencia")
         if aceleracion_ok:
             score += 2.5
             motivos.append("volumen acelerando")
+        score += mtf["confirmacion"]
+        if mtf["confirmacion"] > 0:
+            motivos.append(f"confirmación MTF {mtf['mtf_alineacion']}")
 
-        if not sobre_tendencia:
-            motivos.append("debajo EMA tendencia")
-        if not emas:
-            motivos.append("EMA no alineadas")
-        if not breakout:
-            motivos.append("sin breakout")
-        if not vol_ok:
-            motivos.append("volumen insuficiente")
-        if not rsi_ok:
-            motivos.append("RSI fuera de zona")
-        if not mom_ok:
-            motivos.append("momentum insuficiente")
-        if not atr_ok:
-            motivos.append("ATR insuficiente")
-        if not no_ext:
-            motivos.append("movimiento demasiado extendido")
-        if not macd_ok:
-            motivos.append("MACD negativo")
-        if not adx_ok:
-            motivos.append("ADX débil")
+        if not sobre_tendencia: motivos.append("debajo EMA tendencia")
+        if not emas: motivos.append("EMA no alineadas")
+        if not breakout: motivos.append("sin breakout")
+        if not vol_ok: motivos.append("volumen insuficiente")
+        if not rsi_ok: motivos.append("RSI fuera de zona")
+        if not mom_ok: motivos.append("momentum insuficiente")
+        if not atr_ok: motivos.append("ATR insuficiente")
+        if not no_ext: motivos.append("movimiento demasiado extendido")
+        if not macd_ok: motivos.append("MACD negativo")
+        if not adx_ok: motivos.append("ADX débil")
+        if not tf15_ok: motivos.append("15m sin confirmación alcista")
+        if not tf1h_ok: motivos.append("1h sin confirmación alcista")
 
-        # Dos familias de entrada:
-        # 1) continuación: exige estructura + participación;
-        # 2) breakout: permite entrar con algo menos de pendiente/volumen si
-        #    el propio rompimiento aporta la confirmación de flujo.
         continuacion = (
-            sobre_tendencia and emas and slope_ok
-            and macd_ok and rsi_ok and mom_ok and atr_ok
-            and vol_ok and no_ext
+            sobre_tendencia and emas and slope_ok and macd_ok and rsi_ok
+            and mom_ok and atr_ok and vol_ok and no_ext
         )
         breakout_fuerte = (
-            breakout and sobre_tendencia and emas
-            and macd_ok and rsi_ok and mom_ok and atr_ok
-            and no_ext and (vol_ok or aceleracion_ok)
+            breakout and sobre_tendencia and emas and macd_ok and rsi_ok
+            and mom_ok and atr_ok and no_ext and (vol_ok or aceleracion_ok)
         )
         cruce_impulso = (
-            sobre_tendencia and emas and macd_ok and rsi_ok
-            and mom_ok and atr_ok and no_ext
-            and macd_crec and (vol_ok or aceleracion_ok)
+            sobre_tendencia and emas and macd_ok and rsi_ok and mom_ok
+            and atr_ok and no_ext and macd_crec and (vol_ok or aceleracion_ok)
         )
 
-        comprar = bool(
-            score >= score_min
-            and (continuacion or breakout_fuerte or cruce_impulso)
-        )
+        # MTF no sustituye al setup principal: actúa como filtro de contexto.
+        # Para conservar un perfil agresivo, basta 15m alcista; 1h añade calidad.
+        mtf_gate = tf15_ok
+        comprar = bool(score >= score_min and mtf_gate and (continuacion or breakout_fuerte or cruce_impulso))
 
-        return {
+        resultado.update({
             "score": float(min(score, 100.0)),
             "comprar": comprar,
             "motivo": motivos,
@@ -312,7 +359,14 @@ def _analizar_impulso(df, ticker, es_crypto=False):
             "regimen": regimen,
             "adx": adx,
             "aceleracion_volumen": aceleracion_vol,
-        }
+            "tf15_alcista": bool(tf15_ok),
+            "tf1h_alcista": bool(tf1h_ok),
+            "tf15_fuerte": bool(mtf["tf15_fuerte"]),
+            "tf1h_fuerte": bool(mtf["tf1h_fuerte"]),
+            "mtf_confirmacion": float(mtf["confirmacion"]),
+            "mtf_alineacion": mtf["alineacion"],
+        })
+        return resultado
     except Exception as e:
         print(f"[{ 'crypto' if es_crypto else 'acciones' } scanner] {ticker}: error analizando impulso: {e}")
         return resultado
@@ -357,11 +411,3 @@ def _generar_senal_cripto(df):
     if actual["close"] < actual["ema_tendencia"] and actual["macd"] < actual["macd_signal"] and float(actual["rsi"]) < 45:
         return "VENDER"
     return "ESPERAR"
-
-
-def generar_senal(df, ticker):
-    try:
-        return _generar_senal_cripto(df) if "/" in str(ticker) else _generar_senal_acciones(df)
-    except Exception as e:
-        print(f"{ticker}: error generando señal: {e}")
-        return "ESPERAR"
