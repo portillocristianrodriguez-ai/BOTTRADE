@@ -172,7 +172,6 @@ def _integrar_senal_temprana(original, df, ticker, es_crypto):
 
         if trading and early.get("comprar_temprano"):
             base_score = float(salida.get("score", 0.0) or 0.0)
-            # El motor temprano no puede rescatar una señal claramente bajista.
             regimen = str(salida.get("regimen", "")).lower()
             if regimen not in {"bajista"} and base_score >= float(getattr(cfg, "EARLY_SIGNAL_BASE_SCORE_FLOOR", 55.0)):
                 salida["comprar"] = True
@@ -260,9 +259,16 @@ def main():
     _instalar_sizing_por_score(bot)
     dynamic_exit_manager.instalar(bot)
 
+    # El analista IA observa fills/equity y ofrece propuestas con permiso explícito.
+    # Se instala aquí, antes de bot.main(), para que Telegram y el monitor queden activos.
+    try:
+        import ai_analyst_live
+        ai_analyst_live.install(bot)
+    except Exception as exc:
+        bot.log.warning("[AI] integración no disponible; trading continúa sin ella: %s", exc)
+
     # El universo de acciones se instala ANTES de bot.main(), para que
     # main.py nunca arranque el scanner con los 5 tickers por defecto.
-    # No modifica señales, órdenes, SL/TP, riesgo ni exposición.
     stock_universe.instalar(bot.config, bot.broker)
 
     lanzar_stream_ejecuciones()
