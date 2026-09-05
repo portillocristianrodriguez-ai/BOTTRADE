@@ -14,6 +14,7 @@ from microstructure_memory import evaluar_microestructura
 _LOCK = threading.RLock()
 _LAST_ACTION = {}
 _TIGHTENED_TRAIL = {}
+_DUST_GUARD_INSTALLED = False
 
 
 def _num(value, default=0.0):
@@ -61,6 +62,60 @@ def limpiar_trailing(ticker):
         _LAST_ACTION.pop(key, None)
 
 
+def _normalizar_qty(broker, ticker, qty):
+    normalizar = getattr(broker, "_normalizar_qty_crypto", None)
+    if callable(normalizar):
+        return normalizar(ticker, qty)
+    from crypto_quantity import normalizar_cantidad_crypto
+    return normalizar_cantidad_crypto(qty)
+
+
+def _instalar_guard_vender_dust(broker, log):
+    """Impide que el flujo general intente enviar crypto dust al broker.
+
+    Es una barrera anterior a broker.vender(), porque el flujo de stop-loss
+    principal puede intentar vender una posición residual aunque el motor
+    dynamic-exit ya la haya identificado como no negociable.
+    """
+    global _DUST_GUARD_INSTALLED
+    if _DUST_GUARD_INSTALLED or broker is None:
+        return
+    original = getattr(broker, "vender", None)
+    if not callable(original) or getattr(original, "_bottrade_dust_guard", False):
+        _DUST_GUARD_INSTALLED = True
+        return
+
+    def vender_sin_dust(ticker):
+        try:
+            if broker.es_cripto(ticker):
+                posicion = broker.obtener_posicion(ticker)
+                qty = getattr(posicion, "qty", 0) if posicion is not None else 0
+                qty_negociable = _normalizar_qty(broker, ticker, qty)
+                if _num(qty_negociable) <= 0:
+                    if log:
+                        log.info(
+                            "[precision] %s SELL omitida definitivamente: "
+                            "posición residual/dust no negociable (qty=%s).",
+                            ticker,
+                            qty,
+                        )
+                    return None
+        except Exception as exc:
+            if log:
+                log.warning(
+                    "[precision] %s no pudo validarse como dust antes de vender: %s",
+                    ticker,
+                    exc,
+                )
+        return original(ticker)
+
+    vender_sin_dust._bottrade_dust_guard = True
+    broker.vender = vender_sin_dust
+    _DUST_GUARD_INSTALLED = True
+    if log:
+        log.info("[precision] Guard de crypto dust instalado antes de broker.vender().")
+
+
 def _partial_sell(broker, ticker, fraction):
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
@@ -80,9 +135,7 @@ def _partial_sell(broker, ticker, fraction):
 
     fraction = max(0.10, min(1.0, _num(fraction, 0.5)))
     sell_qty = qty * fraction
-    normalizar = getattr(broker, "_normalizar_qty_crypto", None)
-    if callable(normalizar):
-        sell_qty = normalizar(ticker, sell_qty)
+    sell_qty = _normalizar_qty(broker, ticker, sell_qty)
     if sell_qty <= 0:
         return None
 
@@ -149,21 +202,11 @@ def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
         with lock:
             if not broker.tiene_posicion_abierta(ticker):
                 return False
-
-            # Evita llegar siquiera a broker.vender() cuando la posición
-            # restante es puro dust crypto. El wrapper de submit_order es
-            # una segunda barrera, pero aquí mantenemos coherencia de estado
-            # y evitamos registrar falsamente una venta enviada.
             if broker.es_cripto(ticker):
                 try:
                     posicion = broker.obtener_posicion(ticker)
                     qty = getattr(posicion, "qty", 0) if posicion is not None else 0
-                    normalizar = getattr(broker, "_normalizar_qty_crypto", None)
-                    if callable(normalizar):
-                        qty_negociable = normalizar(ticker, qty)
-                    else:
-                        from crypto_quantity import normalizar_cantidad_crypto
-                        qty_negociable = normalizar_cantidad_crypto(qty)
+                    qty_negociable = _normalizar_qty(broker, ticker, qty)
                     if _num(qty_negociable) <= 0:
                         if log:
                             log.info(
@@ -180,9 +223,6 @@ def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
                             ticker,
                             exc,
                         )
-                    # Fail-safe: el guard de submit_order sigue siendo la
-                    # última barrera antes de Alpaca.
-
             mensaje = broker.vender(ticker)
         if mensaje and log:
             log.warning("[DYNAMIC-EXIT] %s salida completa ejecutada: %s", ticker, motivo)
@@ -326,6 +366,11 @@ def instalar(main_module):
     original = getattr(main_module, "gestionar_posiciones_crypto", None)
     if not callable(original) or getattr(original, "_dynamic_exit_installed", False):
         return False
+
+    broker = getattr(main_module, "broker", None)
+    log = getattr(main_module, "log", None)
+    _instalar_guard_vender_dust(broker, log)
+
     def wrapper():
         _gestionar_previamente(main_module)
         return original()
