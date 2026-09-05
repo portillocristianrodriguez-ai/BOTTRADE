@@ -1,0 +1,49 @@
+name: Sync dashboard with Alpaca account
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply Alpaca source-of-truth fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('dashboard.py')
+          s = p.read_text()
+          old = '''    day_pnl=None; pnl_source="No disponible"\n    try:\n        h=alpaca_get("/v2/account/portfolio/history",{"period":"1D","timeframe":"5Min","extended_hours":"true"})\n        pl=h.get("profit_loss") or []; eq=h.get("equity") or []\n        if pl and pl[-1] is not None: day_pnl=float(pl[-1]); pnl_source="Alpaca portfolio history · 1D"\n        elif len(eq)>=2 and eq[0] is not None and eq[-1] is not None: day_pnl=float(eq[-1])-float(eq[0]); pnl_source="Alpaca equity history · 1D"\n    except requests.RequestException: pass\n'''
+          new = '''    day_pnl=None; pnl_source="No disponible"\n    try:\n        # Alpaca account is the single source of truth for the headline daily P&L.\n        # This avoids small timing/sampling differences from portfolio history.\n        if account.get("equity") is not None and account.get("last_equity") is not None:\n            day_pnl=float(account["equity"])-float(account["last_equity"])\n            pnl_source="Alpaca account · equity - last_equity"\n    except (TypeError, ValueError):\n        pass\n'''
+          if old not in s:
+              raise SystemExit('Expected P&L block not found; refusing partial edit')
+          s = s.replace(old, new, 1)
+          old_return = '''    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{"invested":invested,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100},"execution":{"fills":len(fills),"buys":buys,"sells":sells,"filled_orders":filled_orders,"window":"últimos 50 fills"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}\n'''
+          new_return = '''    account_equity=float(account.get("equity") or 0)\n    account_cash=float(account.get("cash") or 0)\n    account_long_mv=float(account.get("long_market_value") or 0)\n    account_short_mv=float(account.get("short_market_value") or 0)\n    account_equity_reconciled=account_cash+account_long_mv+account_short_mv\n    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"last_equity":account.get("last_equity"),"portfolio_value":account.get("portfolio_value"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{"invested":invested,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100,"account_long_market_value":account_long_mv,"account_short_market_value":account_short_mv,"position_value_delta":invested-(account_long_mv+account_short_mv),"equity_reconciliation_delta":account_equity-account_equity_reconciled},"execution":{"fills":len(fills),"buys":buys,"sells":sells,"filled_orders":filled_orders,"window":"últimos 50 fills"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}\n'''
+          if old_return not in s:
+              raise SystemExit('Expected return block not found; refusing partial edit')
+          s = s.replace(old_return, new_return, 1)
+          p.write_text(s)
+          PY
+      - name: Commit synced dashboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dashboard.py
+          if git diff --cached --quiet; then
+            echo "Dashboard already synced"
+            exit 0
+          fi
+          git commit -m "fix: align dashboard account metrics with Alpaca"
+          git push
+      - name: Remove one-time workflow
+        run: |
+          rm -f .github/workflows/sync-dashboard-alpaca.yml
+          git add .github/workflows/sync-dashboard-alpaca.yml
+          git commit -m "chore: remove one-time dashboard sync workflow"
+          git push
