@@ -46,11 +46,17 @@ def test_ratio_inconsistente_se_descarta():
     out = volume_data_hardening._sanitize(
         _df([100] * 6, ratio=[1.0] * 6), _config(5)
     )
-    # En este caso el ratio es consistente con 100 / 100.
     assert math.isclose(float(out.iloc[-1]["volumen_ratio"]), 1.0)
 
     out = volume_data_hardening._sanitize(
         _df([100] * 6, ratio=[2.0] * 6), _config(5)
+    )
+    assert pd.isna(out.iloc[-1]["volumen_ratio"])
+
+
+def test_ratio_absolutamente_anomalo_se_descarta():
+    out = volume_data_hardening._sanitize(
+        _df([100] * 6, mean=[1e-9] * 6, ratio=[1e11] * 6), _config(5)
     )
     assert pd.isna(out.iloc[-1]["volumen_ratio"])
 
