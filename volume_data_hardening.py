@@ -14,11 +14,8 @@ import pandas as pd
 
 _INSTALLED = False
 
-# Evita divisiones numéricamente inestables sin imponer un límite económico
-# arbitrario al ratio. El volumen crypto puede ser fraccional, por lo que el
-# umbral es deliberadamente muy pequeño y solo descarta denominadores que
-# están en la zona de precisión numérica.
 _MIN_REFERENCE_VOLUME = 1e-12
+_MAX_NUMERIC_RATIO = 1_000_000.0
 
 
 def _finite_positive(value):
@@ -39,10 +36,10 @@ def _ratio_consistente(volume, reference_mean, ratio):
         return False
     if not (math.isfinite(v) and math.isfinite(base) and math.isfinite(r)):
         return False
-    if v < 0 or base <= _MIN_REFERENCE_VOLUME or r < 0:
+    if v < 0 or base <= _MIN_REFERENCE_VOLUME or r < 0 or r > _MAX_NUMERIC_RATIO:
         return False
     esperado = v / base
-    if not math.isfinite(esperado):
+    if not math.isfinite(esperado) or esperado > _MAX_NUMERIC_RATIO:
         return False
     return math.isclose(r, esperado, rel_tol=1e-9, abs_tol=1e-12)
 
@@ -64,20 +61,16 @@ def _sanitize(df, config_module):
         mean = pd.to_numeric(out[mean_col], errors="coerce")
         ratio = pd.to_numeric(out[ratio_col], errors="coerce")
 
-        window = min_periods
-        valid_count = volume.shift(1).rolling(window, min_periods=window).count()
-        valid_mean = mean.where(valid_count >= window)
+        valid_count = volume.shift(1).rolling(min_periods, min_periods=min_periods).count()
+        valid_mean = mean.where(valid_count >= min_periods)
         valid_mean = valid_mean.where(valid_mean.map(_finite_positive))
 
-        # No basta con que el ratio sea finito: debe ser exactamente el
-        # cociente de los datos que lo originan. Esto bloquea valores residuales
-        # de una capa anterior o fallbacks que aparenten ser válidos.
         consistent = pd.Series(
             [
                 _ratio_consistente(v, m, r)
-                if pd.notna(v) and pd.notna(m) and pd.notna(r) and pd.notna(vm)
+                if pd.notna(v) and pd.notna(m) and pd.notna(r)
                 else False
-                for v, m, r, vm in zip(volume, valid_mean, ratio, valid_mean)
+                for v, m, r in zip(volume, valid_mean, ratio)
             ],
             index=out.index,
         )
