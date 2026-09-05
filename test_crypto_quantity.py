@@ -22,6 +22,10 @@ class TestCryptoQuantity(unittest.TestCase):
         self.assertEqual(qty, Decimal("2428548997.204631300"))
         self.assertLess(qty, Decimal("2428548997.204632123"))
 
+    def test_dust_becomes_zero(self):
+        qty = normalizar_cantidad_crypto("0.000000823", None)
+        self.assertEqual(qty, Decimal("0"))
+
     def test_invalid_or_non_positive(self):
         self.assertEqual(normalizar_cantidad_crypto("nope", "0.0001"), Decimal("0"))
         self.assertEqual(normalizar_cantidad_crypto("0", "0.0001"), Decimal("0"))
