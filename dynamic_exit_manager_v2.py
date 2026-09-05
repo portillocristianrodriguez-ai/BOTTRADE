@@ -149,6 +149,40 @@ def _ejecutar_exit_si_corresponde(main_module, broker, ticker, log, motivo):
         with lock:
             if not broker.tiene_posicion_abierta(ticker):
                 return False
+
+            # Evita llegar siquiera a broker.vender() cuando la posición
+            # restante es puro dust crypto. El wrapper de submit_order es
+            # una segunda barrera, pero aquí mantenemos coherencia de estado
+            # y evitamos registrar falsamente una venta enviada.
+            if broker.es_cripto(ticker):
+                try:
+                    posicion = broker.obtener_posicion(ticker)
+                    qty = getattr(posicion, "qty", 0) if posicion is not None else 0
+                    normalizar = getattr(broker, "_normalizar_qty_crypto", None)
+                    if callable(normalizar):
+                        qty_negociable = normalizar(ticker, qty)
+                    else:
+                        from crypto_quantity import normalizar_cantidad_crypto
+                        qty_negociable = normalizar_cantidad_crypto(qty)
+                    if _num(qty_negociable) <= 0:
+                        if log:
+                            log.info(
+                                "[DYNAMIC-EXIT] %s salida omitida: posición residual/dust "
+                                "sin cantidad negociable (qty=%s)",
+                                ticker,
+                                qty,
+                            )
+                        return False
+                except Exception as exc:
+                    if log:
+                        log.warning(
+                            "[DYNAMIC-EXIT] %s no pudo validar qty crypto antes de salir: %s",
+                            ticker,
+                            exc,
+                        )
+                    # Fail-safe: el guard de submit_order sigue siendo la
+                    # última barrera antes de Alpaca.
+
             mensaje = broker.vender(ticker)
         if mensaje and log:
             log.warning("[DYNAMIC-EXIT] %s salida completa ejecutada: %s", ticker, motivo)
