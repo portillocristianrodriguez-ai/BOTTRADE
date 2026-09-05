@@ -8,6 +8,7 @@ import after_hours_hardening
 import data_quality_hardening
 import persistence_hardening
 import strategy_data_hardening
+import volume_data_hardening
 import telegram_hardening
 import telegram_startup_summary
 import telegram_webhook
@@ -22,6 +23,7 @@ if __name__ == "__main__":
     data_quality_hardening.instalar(bot)
     persistence_hardening.instalar(bot)
     strategy_data_hardening.instalar(estrategia)
+    volume_data_hardening.instalar(estrategia)
     telegram_hardening.instalar(bot)
     telegram_webhook.instalar(bot)
     worker.main()
