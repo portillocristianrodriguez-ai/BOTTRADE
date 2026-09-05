@@ -111,9 +111,40 @@ def _registrar_webhook_publico() -> bool:
         return False
 
 
+def _desactivar_webhook_legacy() -> bool:
+    """Elimina el webhook de una instancia Render que ya no debe recibir Telegram."""
+    token = str(getattr(config, "TELEGRAM_BOT_TOKEN", "") or "").strip()
+    if not token:
+        log.info("[Telegram] Receiver Render legacy desactivado; no hay token para eliminar webhook.")
+        return True
+    url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+    try:
+        response = requests.post(
+            url,
+            json={"drop_pending_updates": False},
+            timeout=15,
+        )
+        response.raise_for_status()
+        datos = response.json()
+        if not datos.get("ok"):
+            log.error("[Telegram] No se pudo eliminar el webhook legacy: %s", datos)
+            return False
+        log.info("[Telegram] Webhook legacy de Render eliminado; Railway queda como receptor único.")
+        return True
+    except Exception as exc:
+        log.error("[Telegram] Error eliminando webhook legacy: %s", exc)
+        return False
+
+
 def instalar(main_module) -> None:
-    """En Render sustituye polling por webhook; fuera de Render no altera nada."""
+    """En Render sustituye polling por webhook, salvo cuando Render se ha retirado."""
     global _SERVER, _THREAD, _CALLBACK, _SECRET, _PATH
+
+    if str(os.environ.get("RENDER_DISABLE_TELEGRAM", "")).strip().lower() in {"1", "true", "yes", "si", "sí", "on"}:
+        _desactivar_webhook_legacy()
+        main_module.log.info("[Telegram] Receiver Telegram de Render desactivado por configuración.")
+        return
+
     if not os.environ.get("RENDER_EXTERNAL_URL") or not config.TELEGRAM_BOT_TOKEN:
         return
     if getattr(notificaciones.iniciar_comandos, "_bottrade_webhook", False):
