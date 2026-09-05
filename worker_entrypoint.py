@@ -9,6 +9,7 @@ import data_quality_hardening
 import persistence_hardening
 import strategy_data_hardening
 import volume_data_hardening
+import pattern_dataset_cleaner
 import telegram_hardening
 import telegram_startup_summary
 import telegram_webhook
@@ -24,6 +25,7 @@ if __name__ == "__main__":
     persistence_hardening.instalar(bot)
     strategy_data_hardening.instalar(estrategia)
     volume_data_hardening.instalar(estrategia)
+    pattern_dataset_cleaner.limpiar(bot.config)
     telegram_hardening.instalar(bot)
     telegram_webhook.instalar(bot)
     worker.main()
