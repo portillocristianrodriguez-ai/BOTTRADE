@@ -44,6 +44,14 @@ class EarlySignalTests(unittest.TestCase):
         result = early_signal.evaluar(frame, min_score=72)
         self.assertFalse(result["comprar_temprano"])
 
+    def test_rejects_near_zero_volume_reference(self):
+        frame = self._frame()
+        frame["volume"] = 0.0
+        frame.iloc[:-1, frame.columns.get_loc("volume")] = 1e-13
+        frame.iloc[-1, frame.columns.get_loc("volume")] = 1.0
+        result = early_signal.evaluar(frame)
+        self.assertIsNone(result["volume_ratio"])
+
 
 if __name__ == "__main__":
     unittest.main()
