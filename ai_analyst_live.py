@@ -5,7 +5,7 @@ from dataclasses import asdict
 from typing import Any
 import config
 from ai_investment_analyst import Proposal, authorize_proposal
-from ai_analyst_runtime import AIAnalystRuntime
+from ai_analyst_runtime import AIAnalystRuntime, read_overrides
 _LOCK=threading.RLock(); _RUNTIME=None; _PENDING={}; _LOTS={}; _FILLED_BY_ORDER={}; _STARTED=False
 
 def _runtime():
@@ -56,8 +56,7 @@ def analyze_now(broker):
         trades_records=_runtime().memory.recent(kind="trade",limit=1000); equity_records=_runtime().memory.recent(kind="equity_snapshot",limit=1000)
     trades=[dict(r.get("payload",{})) for r in trades_records]; equity_curve=[dict(r.get("payload",{})) for r in equity_records]
     report=_runtime().analyze(trades,equity_curve,_positions(broker))
-    raw=report.get("learning",{}).get("proposal")
-    proposal=None
+    raw=report.get("learning",{}).get("proposal"); proposal=None
     if raw:
         try:proposal=Proposal(**raw)
         except (TypeError,ValueError):proposal=None
@@ -96,16 +95,13 @@ def command(command,broker):
     return "Uso: /ia | /ia analizar | /ia aplicar <ID_DE_PROPUESTA>"
 
 def _load_persisted_overrides():
-    overrides=_runtime().memory and __import__("ai_analyst_runtime").ai_analyst_runtime.read_overrides(_runtime().override_path)
+    overrides=read_overrides(_runtime().override_path)
     if not overrides:return
     applied={}
     for key,value in overrides.items():
         if hasattr(config,key):
-            try:
-                setattr(config,key,value); applied[key]=value
-            except Exception:pass
-    if applied:
-        config.validar()
+            setattr(config,key,value); applied[key]=value
+    if applied:config.validar()
 
 def _loop(broker):
     interval=max(60,int(os.environ.get("AI_ANALYST_INTERVAL_SECONDS","900")))
