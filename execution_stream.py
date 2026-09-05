@@ -48,6 +48,15 @@ def _callback_factory():
             client_order_id,
         )
 
+        # El analista recibe únicamente eventos de ejecución observados.
+        # Este hook está aislado para que un fallo del analista nunca afecte
+        # al stream ni al motor de trading.
+        try:
+            from ai_analyst_live import record_trade_update
+            record_trade_update(data)
+        except Exception as exc:
+            log.debug("[AI] no se pudo registrar trade_update: %s", exc)
+
     return on_trade_update
 
 
