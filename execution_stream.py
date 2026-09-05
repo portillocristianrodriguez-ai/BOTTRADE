@@ -33,8 +33,9 @@ def _instalar_proteccion_qty_crypto():
     último múltiplo cuando este puede estar unos decimales por encima del saldo.
 
     Si la posición resultante es puro *dust* (menor que el margen mínimo de
-    seguridad), no se intenta enviar la orden: no existe una cantidad válida
-    que el bot deba mandar al broker.
+    seguridad), se aborta mediante excepción controlada para que la capa
+    broker trate la operación como una venta no enviada, no como una orden
+    aceptada.
     """
     global _PRECISION_PATCH_INSTALLED
     with _PRECISION_PATCH_LOCK:
@@ -79,7 +80,9 @@ def _instalar_proteccion_qty_crypto():
                             qty,
                             incremento,
                         )
-                        return None
+                        raise RuntimeError(
+                            f"[precision] {symbol} SELL omitida: cantidad residual/dust no negociable"
+                        )
                     if str(qty_segura) != str(qty):
                         log.warning(
                             "[precision] %s SELL qty ajustada %s -> %s (incremento=%s)",
@@ -130,9 +133,6 @@ def _callback_factory():
             client_order_id,
         )
 
-        # El analista recibe únicamente eventos de ejecución observados.
-        # Este hook está aislado para que un fallo del analista nunca afecte
-        # al stream ni al motor de trading.
         try:
             from ai_analyst_live import record_trade_update
             record_trade_update(data)
