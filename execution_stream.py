@@ -31,6 +31,10 @@ def _instalar_proteccion_qty_crypto():
     entre el saldo local y el saldo liquidable del broker. El wrapper redondea
     hacia abajo usando el incremento del activo y evita pedir exactamente el
     último múltiplo cuando este puede estar unos decimales por encima del saldo.
+
+    Si la posición resultante es puro *dust* (menor que el margen mínimo de
+    seguridad), no se intenta enviar la orden: no existe una cantidad válida
+    que el bot deba mandar al broker.
     """
     global _PRECISION_PATCH_INSTALLED
     with _PRECISION_PATCH_LOCK:
@@ -68,7 +72,14 @@ def _instalar_proteccion_qty_crypto():
 
                     qty_segura = normalizar_cantidad_crypto(qty, incremento)
                     if qty_segura <= 0:
-                        raise ValueError(f"qty SELL crypto inválida tras normalización: {symbol} qty={qty}")
+                        log.info(
+                            "[precision] %s SELL omitida: cantidad residual/dust "
+                            "no negociable (qty=%s, incremento=%s).",
+                            symbol,
+                            qty,
+                            incremento,
+                        )
+                        return None
                     if str(qty_segura) != str(qty):
                         log.warning(
                             "[precision] %s SELL qty ajustada %s -> %s (incremento=%s)",
