@@ -118,11 +118,13 @@ def state(period: str):
     except requests.RequestException: pass
     day_pnl=None; pnl_source="No disponible"
     try:
-        h=alpaca_get("/v2/account/portfolio/history",{"period":"1D","timeframe":"5Min","extended_hours":"true"})
-        pl=h.get("profit_loss") or []; eq=h.get("equity") or []
-        if pl and pl[-1] is not None: day_pnl=float(pl[-1]); pnl_source="Alpaca portfolio history · 1D"
-        elif len(eq)>=2 and eq[0] is not None and eq[-1] is not None: day_pnl=float(eq[-1])-float(eq[0]); pnl_source="Alpaca equity history · 1D"
-    except requests.RequestException: pass
+        # Alpaca account is the single source of truth for the headline daily P&L.
+        # This avoids small timing/sampling differences from portfolio history.
+        if account.get("equity") is not None and account.get("last_equity") is not None:
+            day_pnl=float(account["equity"])-float(account["last_equity"])
+            pnl_source="Alpaca account · equity - last_equity"
+    except (TypeError, ValueError):
+        pass
     invested=sum(float(p.get("market_value") or 0) for p in positions)
     unrealized=sum(float(p.get("unrealized_pl") or 0) for p in positions)
     largest=max(positions,key=lambda p:abs(float(p.get("market_value") or 0)),default=None)
@@ -141,7 +143,12 @@ def state(period: str):
         clock_info={"status":clock_status,"is_open":bool(clock.get("is_open")),"next_open":clock.get("next_open"),"next_close":clock.get("next_close")}
     except requests.RequestException:
         clock_info={"status":"UNKNOWN","is_open":False,"next_open":None,"next_close":None}
-    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{"invested":invested,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100},"execution":{"fills":len(fills),"buys":buys,"sells":sells,"filled_orders":filled_orders,"window":"últimos 50 fills"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}
+    account_equity=float(account.get("equity") or 0)
+    account_cash=float(account.get("cash") or 0)
+    account_long_mv=float(account.get("long_market_value") or 0)
+    account_short_mv=float(account.get("short_market_value") or 0)
+    account_equity_reconciled=account_cash+account_long_mv+account_short_mv
+    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"last_equity":account.get("last_equity"),"portfolio_value":account.get("portfolio_value"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{"invested":invested,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100,"account_long_market_value":account_long_mv,"account_short_market_value":account_short_mv,"position_value_delta":invested-(account_long_mv+account_short_mv),"equity_reconciliation_delta":account_equity-account_equity_reconciled},"execution":{"fills":len(fills),"buys":buys,"sells":sells,"filled_orders":filled_orders,"window":"últimos 50 fills"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}
 
 
 class Handler(BaseHTTPRequestHandler):
