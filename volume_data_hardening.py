@@ -2,7 +2,8 @@
 
 Este módulo no cambia umbrales de estrategia ni genera señales. Solo impide
 que ratios de volumen calculados con denominadores no fiables (histórico
-insuficiente, media cero/casi cero, NaN o infinito) se utilicen o persistan.
+insuficiente, media cero/casi cero, NaN, infinito o ratio inconsistente)
+se utilicen o persistan.
 """
 from __future__ import annotations
 
@@ -13,13 +14,37 @@ import pandas as pd
 
 _INSTALLED = False
 
+# Evita divisiones numéricamente inestables sin imponer un límite económico
+# arbitrario al ratio. El volumen crypto puede ser fraccional, por lo que el
+# umbral es deliberadamente muy pequeño y solo descarta denominadores que
+# están en la zona de precisión numérica.
+_MIN_REFERENCE_VOLUME = 1e-12
+
 
 def _finite_positive(value):
     try:
         number = float(value)
     except (TypeError, ValueError):
         return False
-    return math.isfinite(number) and number > 0.0
+    return math.isfinite(number) and number > _MIN_REFERENCE_VOLUME
+
+
+def _ratio_consistente(volume, reference_mean, ratio):
+    """Comprueba que el ratio recibido coincide con volume / media previa."""
+    try:
+        v = float(volume)
+        base = float(reference_mean)
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(v) and math.isfinite(base) and math.isfinite(r)):
+        return False
+    if v < 0 or base <= _MIN_REFERENCE_VOLUME or r < 0:
+        return False
+    esperado = v / base
+    if not math.isfinite(esperado):
+        return False
+    return math.isclose(r, esperado, rel_tol=1e-9, abs_tol=1e-12)
 
 
 def _sanitize(df, config_module):
@@ -28,8 +53,6 @@ def _sanitize(df, config_module):
     out = df.copy()
     periodo = max(5, int(getattr(config_module, "VOLUMEN_SMA_PERIODO", 20)))
 
-    # Los ratios solo son fiables cuando existen exactamente los datos que
-    # requiere su ventana y la media de referencia es positiva y finita.
     for ratio_col, mean_col, min_periods in (
         ("volumen_ratio", "volumen_media", periodo),
         ("aceleracion_volumen", "volumen_media_corta", 3),
@@ -41,23 +64,33 @@ def _sanitize(df, config_module):
         mean = pd.to_numeric(out[mean_col], errors="coerce")
         ratio = pd.to_numeric(out[ratio_col], errors="coerce")
 
-        # Recalcular disponibilidad de histórico a partir de la serie real,
-        # evitando depender de un valor numérico residual de una media.
         window = min_periods
         valid_count = volume.shift(1).rolling(window, min_periods=window).count()
         valid_mean = mean.where(valid_count >= window)
         valid_mean = valid_mean.where(valid_mean.map(_finite_positive))
 
-        valid_ratio = ratio.where(valid_mean.notna())
-        valid_ratio = valid_ratio.where(valid_ratio.map(lambda x: math.isfinite(float(x)) if pd.notna(x) else False))
-        valid_ratio = valid_ratio.where(valid_ratio >= 0.0)
+        # No basta con que el ratio sea finito: debe ser exactamente el
+        # cociente de los datos que lo originan. Esto bloquea valores residuales
+        # de una capa anterior o fallbacks que aparenten ser válidos.
+        consistent = pd.Series(
+            [
+                _ratio_consistente(v, m, r)
+                if pd.notna(v) and pd.notna(m) and pd.notna(r) and pd.notna(vm)
+                else False
+                for v, m, r, vm in zip(volume, valid_mean, ratio, valid_mean)
+            ],
+            index=out.index,
+        )
+        valid_ratio = ratio.where(consistent)
 
         out[mean_col] = valid_mean
         out[ratio_col] = valid_ratio
 
     if "volumen_valido" in out.columns:
         volume = pd.to_numeric(out["volume"], errors="coerce")
-        out["volumen_valido"] = volume.gt(0) & volume.map(lambda x: math.isfinite(float(x)) if pd.notna(x) else False)
+        out["volumen_valido"] = volume.gt(0) & volume.map(
+            lambda x: math.isfinite(float(x)) if pd.notna(x) else False
+        )
     return out
 
 
