@@ -10,15 +10,86 @@ import threading
 import time
 
 import config
+from crypto_quantity import normalizar_cantidad_crypto
 
 log = logging.getLogger(__name__)
 
 _STREAM_THREAD = None
 _STREAM_LOCK = threading.Lock()
+_PRECISION_PATCH_LOCK = threading.Lock()
+_PRECISION_PATCH_INSTALLED = False
 
 
 def _texto(valor):
     return str(valor) if valor is not None else ""
+
+
+def _instalar_proteccion_qty_crypto():
+    """Corrige qty SELL crypto justo antes de llegar a Alpaca.
+
+    Las posiciones crypto pueden contener pequeñas diferencias de precisión
+    entre el saldo local y el saldo liquidable del broker. El wrapper redondea
+    hacia abajo usando el incremento del activo y evita pedir exactamente el
+    último múltiplo cuando este puede estar unos decimales por encima del saldo.
+    """
+    global _PRECISION_PATCH_INSTALLED
+    with _PRECISION_PATCH_LOCK:
+        if _PRECISION_PATCH_INSTALLED:
+            return
+        try:
+            from alpaca.trading.client import TradingClient
+        except Exception as exc:
+            log.debug("[precision] Alpaca TradingClient no disponible: %s", exc)
+            return
+
+        original = getattr(TradingClient, "submit_order", None)
+        if not callable(original) or getattr(original, "_bottrade_crypto_precision", False):
+            _PRECISION_PATCH_INSTALLED = True
+            return
+
+        def submit_order_safe(self, *args, **kwargs):
+            order_data = kwargs.get("order_data")
+            if order_data is None and args:
+                order_data = args[0]
+
+            try:
+                side = _texto(getattr(order_data, "side", "")).lower()
+                symbol = _texto(getattr(order_data, "symbol", "")).upper()
+                qty = getattr(order_data, "qty", None)
+                es_crypto = "/" in symbol or symbol.endswith("USD")
+
+                if es_crypto and "sell" in side and qty is not None:
+                    incremento = None
+                    try:
+                        asset = self.get_asset(symbol=symbol)
+                        incremento = getattr(asset, "min_trade_increment", None)
+                    except Exception as exc:
+                        log.debug("[precision] no se pudo consultar incremento de %s: %s", symbol, exc)
+
+                    qty_segura = normalizar_cantidad_crypto(qty, incremento)
+                    if qty_segura <= 0:
+                        raise ValueError(f"qty SELL crypto inválida tras normalización: {symbol} qty={qty}")
+                    if str(qty_segura) != str(qty):
+                        log.warning(
+                            "[precision] %s SELL qty ajustada %s -> %s (incremento=%s)",
+                            symbol,
+                            qty,
+                            qty_segura,
+                            incremento,
+                        )
+                        order_data.qty = qty_segura
+            except Exception:
+                raise
+
+            return original(self, *args, **kwargs)
+
+        submit_order_safe._bottrade_crypto_precision = True
+        TradingClient.submit_order = submit_order_safe
+        _PRECISION_PATCH_INSTALLED = True
+        log.info("[precision] Protección de qty crypto instalada.")
+
+
+_instalar_proteccion_qty_crypto()
 
 
 def _callback_factory():
