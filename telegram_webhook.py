@@ -137,18 +137,40 @@ def _desactivar_webhook_legacy() -> bool:
 
 
 def instalar(main_module) -> None:
-    """En Render sustituye polling por webhook, salvo cuando Render se ha retirado."""
+    """
+    Controla la recepción Telegram según el entorno:
+    - RENDER_EXTERNAL_URL (Render): webhook mode
+    - TELEGRAM_DISABLE_RECEIVER=1 (Railway): deshabilita cualquier receptor local
+    - En Railway sin disabling: polling via notificaciones.iniciar_comandos()
+    
+    Esta función previene conflictos 409 en entornos multi-servicio.
+    """
     global _SERVER, _THREAD, _CALLBACK, _SECRET, _PATH
 
-    if str(os.environ.get("RENDER_DISABLE_TELEGRAM", "")).strip().lower() in {"1", "true", "yes", "si", "sí", "on"}:
+    # =========================================================================
+    # MODO 1: Desabilitar receptor (Dashboard/read-only services en Railway)
+    # =========================================================================
+    if str(os.environ.get("TELEGRAM_DISABLE_RECEIVER", "")).strip().lower() in {
+        "1", "true", "yes", "si", "sí", "on"
+    }:
         _desactivar_webhook_legacy()
-        main_module.log.info("[Telegram] Receiver Telegram de Render desactivado por configuración.")
+        main_module.log.info(
+            "[Telegram] Recepción de comandos DESHABILITADA por configuración. "
+            "Las notificaciones salientes permanecen activas."
+        )
         return
 
+    # =========================================================================
+    # MODO 2: Render webhook (legacy support)
+    # =========================================================================
     if not os.environ.get("RENDER_EXTERNAL_URL") or not config.TELEGRAM_BOT_TOKEN:
+        # No hay RENDER_EXTERNAL_URL: continuamos con polling (abajo)
+        # o quedamos sin receptor si TELEGRAM_DISABLE_RECEIVER está activado (arriba).
         return
+    
     if getattr(notificaciones.iniciar_comandos, "_bottrade_webhook", False):
         return
+    
     original = notificaciones.iniciar_comandos
 
     def iniciar_comandos_webhook(callback):
@@ -170,3 +192,4 @@ def instalar(main_module) -> None:
     iniciar_comandos_webhook._bottrade_webhook = True
     notificaciones.iniciar_comandos = iniciar_comandos_webhook
     main_module.log.info("[Telegram] Modo webhook preparado para Render.")
+
