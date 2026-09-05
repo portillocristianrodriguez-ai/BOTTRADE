@@ -11,12 +11,25 @@ import math
 import pandas as pd
 
 
+_MIN_REFERENCE_VOLUME = 1e-12
+
+
 def _f(value):
     try:
         value = float(value)
         return value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
+
+
+def _volume_ratio(current_volume, reference_volume):
+    """Calcula un ratio solo con una referencia numéricamente fiable."""
+    current = _f(current_volume)
+    reference = _f(reference_volume)
+    if current is None or current < 0 or reference is None or reference <= _MIN_REFERENCE_VOLUME:
+        return None
+    ratio = current / reference
+    return _f(ratio)
 
 
 def evaluar(df, *, es_crypto=False, min_score=72.0):
@@ -70,7 +83,7 @@ def evaluar(df, *, es_crypto=False, min_score=72.0):
         accel = _f((ret3 or 0.0) - (prior3 or 0.0))
 
         vol_base = volume.shift(1).rolling(20, min_periods=10).mean().iloc[-1]
-        vol_ratio = _f(volume.iloc[-1] / vol_base) if _f(vol_base) and _f(vol_base) > 0 else None
+        vol_ratio = _volume_ratio(volume.iloc[-1], vol_base)
 
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14, min_periods=14).mean()
@@ -105,8 +118,6 @@ def evaluar(df, *, es_crypto=False, min_score=72.0):
                 score += points
                 motivos.append(text)
 
-        # Nunca dispara por una sola condición. La combinación requiere
-        # tendencia + momentum + aceleración y al menos una confirmación extra.
         comprar = bool(
             score >= float(min_score)
             and trend
