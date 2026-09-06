@@ -1,3 +1,4 @@
+# BOTTRADE web terminal UX revision
 alpaca-py
 pandas
 numpy
