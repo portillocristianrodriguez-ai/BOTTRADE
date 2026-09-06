@@ -5,6 +5,7 @@ Run with: python -m unittest test_alpaca.py
 """
 
 import unittest
+from unittest.mock import patch
 
 import execution_guard
 import execution_idempotency
@@ -26,6 +27,9 @@ class FakeClient:
 
     def get_order_by_client_id(self, client_order_id):
         return self.orders.get(client_order_id)
+
+    def get_account(self):
+        return type("Account", (), {"equity": "10000", "buying_power": "10000"})()
 
     def submit_order(self, order_data=None):
         self.submit_calls += 1
@@ -68,12 +72,13 @@ class SafetyTests(unittest.TestCase):
             "client_order_id": None,
         })()
 
-        first = execution_idempotency.submit_order_idempotente(
-            client, order_data, submit_callable=client.submit_order
-        )
-        second = execution_idempotency.submit_order_idempotente(
-            client, order_data, submit_callable=client.submit_order
-        )
+        with patch.object(execution_idempotency, "_latest_buy_price", return_value=(100.0, "ok")):
+            first = execution_idempotency.submit_order_idempotente(
+                client, order_data, submit_callable=client.submit_order
+            )
+            second = execution_idempotency.submit_order_idempotente(
+                client, order_data, submit_callable=client.submit_order
+            )
 
         self.assertEqual(client.submit_calls, 1)
         self.assertIs(first, second)
