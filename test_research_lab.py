@@ -36,13 +36,13 @@ class ResearchLabTests(unittest.TestCase):
         self.assertEqual(summary["consistency_pct"], 0.0)
 
     def test_walk_forward_selects_candidate_only_from_train_slice(self):
-        idx = pd.date_range("2026-01-01", periods=40, freq="h", tz="UTC")
+        idx = pd.date_range("2026-01-01", periods=30, freq="h", tz="UTC")
         df = pd.DataFrame({
-            "open": [100.0] * 40,
-            "high": [101.0] * 40,
-            "low": [99.0] * 40,
-            "close": [100.0] * 40,
-            "volume": [1000.0] * 40,
+            "open": [100.0] * 30,
+            "high": [101.0] * 30,
+            "low": [99.0] * 30,
+            "close": [100.0] * 30,
+            "volume": [1000.0] * 30,
         }, index=idx)
         calls = []
 
