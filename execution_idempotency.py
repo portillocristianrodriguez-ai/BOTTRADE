@@ -94,13 +94,7 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _latest_buy_price(cliente: Any, symbol: str):
-    """Obtiene el mejor ask actual de Alpaca justo antes de enviar un BUY.
-
-    Para acciones se usa IEX, coherente con el feed utilizado por el bot.
-    Para crypto se usa la cotización US de Alpaca. Si no hay ask válido,
-    se intenta el último trade como fallback. Una cotización demasiado vieja
-    bloquea la orden en lugar de utilizar un precio histórico.
-    """
+    """Obtiene el mejor ask actual de Alpaca justo antes de enviar un BUY."""
     normalized = str(symbol or "").upper().strip()
     is_crypto = "/" in normalized or normalized.endswith("/USD")
     max_age = max(5.0, float(os.environ.get("BOTTRADE_MAX_BUY_QUOTE_AGE_SECONDS", "60")))
@@ -125,10 +119,8 @@ def _latest_buy_price(cliente: Any, symbol: str):
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.data.requests import StockLatestQuoteRequest, StockLatestTradeRequest
             from alpaca.data.enums import DataFeed
-            market_client = StockHistoricalDataClient(
-                getattr(cliente, "_api_key", None),
-                getattr(cliente, "_secret_key", None),
-            )
+            import config
+            market_client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
             quote = market_client.get_stock_latest_quote(
                 StockLatestQuoteRequest(symbol_or_symbols=normalized, feed=DataFeed.IEX)
             ).get(normalized)
@@ -144,22 +136,33 @@ def _latest_buy_price(cliente: Any, symbol: str):
         if price <= 0 or not math.isfinite(price):
             return None, "no_valid_price"
         parsed = _parse_timestamp(timestamp)
-        if parsed is not None:
-            age = (datetime.now(timezone.utc) - parsed).total_seconds()
-            if age < -5 or age > max_age:
-                return None, f"stale_quote_{age:.1f}s"
-        else:
+        if parsed is None:
             return None, "missing_quote_timestamp"
+        age = (datetime.now(timezone.utc) - parsed).total_seconds()
+        if age < -5 or age > max_age:
+            return None, f"stale_quote_{age:.1f}s"
         return price, "ok"
     except Exception as exc:
         return None, f"market_data_error:{exc}"
 
 
-def _refresh_buy_quantity(cliente: Any, order_data: Any):
-    """Recalcula la cantidad BUY usando el precio actual de Alpaca.
+def _replace_qty(order_data: Any, qty: float):
+    try:
+        order_data.qty = qty
+        return order_data
+    except Exception:
+        dumped = order_data.model_dump()
+        dumped["qty"] = qty
+        return type(order_data)(**dumped)
 
-    Mantiene como techo el notional que ya había pasado las barreras de riesgo.
-    Si el precio sube, reduce cantidad; nunca aumenta exposición por esta capa.
+
+def _refresh_buy_quantity(cliente: Any, order_data: Any):
+    """Usa el ask actual para que la cantidad final sea coherente con el mercado.
+
+    La capa nunca aumenta la cantidad original. Si el precio ha subido, reduce
+    cantidad para mantener la orden dentro de los límites actuales de equity,
+    buying power y caps crypto. Si el precio no está disponible o está obsoleto,
+    bloquea el BUY en vez de usar una referencia histórica.
     """
     side = str(getattr(order_data, "side", "") or "").lower()
     if "buy" not in side:
@@ -174,37 +177,48 @@ def _refresh_buy_quantity(cliente: Any, order_data: Any):
     if current_price is None:
         raise ValueError(f"precio BUY no disponible: {reason}")
 
-    # El orden ya fue dimensionado y validado con un precio anterior. Ese
-    # notional es el techo: el precio fresco solo puede reducir la cantidad.
-    reference_price = float(getattr(order_data, "_bottrade_reference_price", 0) or 0)
-    if reference_price <= 0:
-        reference_price = current_price
-
-    max_notional = original_qty * reference_price
-    if max_notional <= 0 or not math.isfinite(max_notional):
-        raise ValueError("notional BUY inválido")
-
-    raw_qty = min(original_qty, max_notional / current_price)
-    is_crypto = "/" in symbol or symbol.endswith("/USD")
-
-    if is_crypto:
-        # Alpaca permite fracciones crypto; 6 decimales mantienen compatibilidad
-        # con el sizing existente y el normalizador de cantidades del bot.
-        qty = float(Decimal(str(raw_qty)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN))
-    else:
-        qty = int(raw_qty)
-
-    if qty <= 0:
-        raise ValueError(f"cantidad BUY nula tras refrescar precio=${current_price:.8f}")
+    account = cliente.get_account()
+    equity = float(getattr(account, "equity", 0) or 0)
+    buying_power = float(getattr(account, "buying_power", 0) or 0)
+    if equity <= 0 or buying_power <= 0:
+        raise ValueError("cuenta BUY inválida")
 
     try:
-        order_data.qty = qty
-    except Exception:
-        dumped = order_data.model_dump()
-        dumped["qty"] = qty
-        order_data = type(order_data)(**dumped)
+        import config
+        buying_power_buffer = min(0.99, max(0.10, float(getattr(config, "ORDER_BUYING_POWER_BUFFER", 0.85))))
+        max_notional = buying_power * buying_power_buffer
+        is_crypto = "/" in symbol or symbol.endswith("/USD")
+        if is_crypto:
+            equity_cap = equity * float(getattr(config, "CRYPTO_MAX_NOTIONAL_PCT", 0.10))
+            hard_cap = float(getattr(config, "CRYPTO_HARD_MAX_NOTIONAL", 100000.0))
+            internal_cap = float(getattr(config, "CRYPTO_INTERNAL_MAX_ORDER_NOTIONAL_USD", hard_cap))
+            max_notional = min(max_notional, equity_cap, hard_cap, internal_cap)
+    except Exception as exc:
+        raise ValueError(f"config BUY inválida: {exc}")
 
-    return order_data
+    if max_notional <= 0 or not math.isfinite(max_notional):
+        raise ValueError("límite de notional BUY inválido")
+
+    safe_qty = min(original_qty, max_notional / current_price)
+    if is_crypto:
+        qty = float(Decimal(str(safe_qty)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN))
+    else:
+        qty = int(safe_qty)
+
+    if qty <= 0:
+        raise ValueError(f"cantidad BUY nula con precio actual ${current_price:.8f}")
+
+    if qty != original_qty:
+        try:
+            import logging
+            logging.getLogger(__name__).info(
+                f"[MARKET_PRICE] {symbol}: precio BUY actualizado=${current_price:.8f}; "
+                f"qty {original_qty}->{qty}; notional<=${max_notional:,.2f}"
+            )
+        except Exception:
+            pass
+
+    return _replace_qty(order_data, qty)
 
 
 def submit_order_idempotente(
@@ -215,7 +229,8 @@ def submit_order_idempotente(
     """Envía una orden y reconcilia el resultado si el submit falla.
 
     Los BUY pasan por una última consulta de mercado a Alpaca justo antes del
-    submit. No se usan barras históricas para decidir la cantidad final.
+    submit. Se utiliza el ask más reciente (IEX en acciones) y se bloquea la
+    orden si la cotización está obsoleta.
     """
     if order_data is None:
         raise ValueError("order_data es obligatorio")
