@@ -7,6 +7,7 @@ import config
 from ai_investment_analyst import Proposal, authorize_proposal
 from ai_analyst_runtime import AIAnalystRuntime, read_overrides
 _LOCK=threading.RLock(); _RUNTIME=None; _PENDING={}; _LOTS={}; _FILLED_BY_ORDER={}; _STARTED=False
+_CONTEXT_KEYS=("RISK_PER_TRADE_PCT","CRYPTO_RISK_PER_TRADE_PCT","STOP_LOSS_PCT","TAKE_PROFIT_PCT","TRAILING_STOP_PCT","ATR_STOP_MULTIPLICADOR","ATR_TAKE_PROFIT_MULTIPLICADOR","EMA_RAPIDA","EMA_LENTA","EMA_TENDENCIA","RSI_PERIODO","RSI_SOBRECOMPRA","RSI_SOBREVENTA","CRYPTO_SCORE_MINIMO","CRYPTO_MIN_MOMENTUM_PCT","CRYPTO_VOLUME_MIN_MULTIPLICADOR","CRYPTO_RSI_MIN","CRYPTO_RSI_MAX")
 
 def _runtime():
     global _RUNTIME
@@ -18,6 +19,9 @@ def _float(v,default=0.0):
     try:return float(v)
     except (TypeError,ValueError):return default
 
+def _strategy_context():
+    return {key:getattr(config,key,None) for key in _CONTEXT_KEYS}
+
 def _event_payload(data):
     event=_text(getattr(data,"event","unknown")).lower(); order=getattr(data,"order",None); symbol=_text(getattr(order,"symbol","")).upper(); side=_text(getattr(order,"side","")).lower(); cumulative=_float(getattr(order,"filled_qty",0)); price=_float(getattr(data,"price",None),_float(getattr(order,"filled_avg_price",0))); return event,order,symbol,cumulative,price,side
 
@@ -25,7 +29,7 @@ def _consume_fifo(symbol,quantity,sell_price):
     realized=[]; remaining=quantity; lots=_LOTS.setdefault(symbol,[])
     while remaining>1e-12 and lots:
         lot=lots[0]; matched=min(remaining,lot["qty"]); pnl=matched*(sell_price-lot["price"])
-        realized.append({"symbol":symbol,"asset_type":"crypto" if "/" in symbol else "stock","qty":matched,"entry_price":lot["price"],"exit_price":sell_price,"risk_amount":lot.get("risk_amount",0.0),"pnl":pnl,"entry_order_id":lot.get("order_id","")}); lot["qty"]-=matched; remaining-=matched
+        realized.append({"symbol":symbol,"asset_type":"crypto" if "/" in symbol else "stock","qty":matched,"entry_price":lot["price"],"exit_price":sell_price,"risk_amount":lot.get("risk_amount",0.0),"pnl":pnl,"entry_order_id":lot.get("order_id",""),"entry_config":dict(lot.get("entry_config",{}))}); lot["qty"]-=matched; remaining-=matched
         if lot["qty"]<=1e-12:lots.pop(0)
     return realized
 
@@ -36,8 +40,9 @@ def record_trade_update(data):
     with _LOCK:
         previous=_FILLED_BY_ORDER.get(order_id,0.0); delta=max(0.0,cumulative-previous); _FILLED_BY_ORDER[order_id]=max(previous,cumulative)
         if delta<=0:return
-        _runtime().memory.append("fill",{"event":event,"order_id":order_id,"symbol":symbol,"side":side,"qty":delta,"price":price})
-        if "buy" in side:_LOTS.setdefault(symbol,[]).append({"qty":delta,"price":price,"order_id":order_id,"risk_amount":0.0}); return
+        _runtime().memory.append("fill",{"event":event,"order_id":order_id,"symbol":symbol,"side":side,"qty":delta,"price":price,"strategy_context":_strategy_context()})
+        if "buy" in side:
+            _LOTS.setdefault(symbol,[]).append({"qty":delta,"price":price,"order_id":order_id,"risk_amount":0.0,"entry_config":_strategy_context()}); return
         if "sell" in side:
             for trade in _consume_fifo(symbol,delta,price):_runtime().memory.append("trade",trade)
 
@@ -69,7 +74,7 @@ def format_report(report):
     metrics=report.get("metrics",{}); risk=report.get("risk",{}); findings=report.get("findings",[]); learning=report.get("learning",{})
     lines=["🤖 AI CHIEF INVESTMENT ANALYST","━━━━━━━━━━━━━━━━━━",f"Operaciones cerradas: {metrics.get('trades',0)}",f"Win rate: {_float(metrics.get('win_rate')):.1%}",f"Profit factor: {metrics.get('profit_factor')}",f"Expectancy: ${_float(metrics.get('expectancy')):+,.2f}",f"Drawdown máximo: {_float(metrics.get('max_drawdown')):.2%}",f"Exposición bruta: {_float(risk.get('gross_exposure_pct')):.2%}"]
     for finding in findings[:4]:lines.append(f"• {finding.get('severity','info').upper()}: {finding.get('message','')}")
-    for observation in learning.get("observations",[])[:3]:lines.append(f"🧠 APRENDIZAJE: {observation}")
+    for observation in learning.get("observations",[])[:4]:lines.append(f"🧠 APRENDIZAJE: {observation}")
     proposal=report.get("proposal")
     if proposal:lines += ["","🧪 PROPUESTA PENDIENTE",f"ID: {proposal['proposal_id']}",f"Cambio: {proposal['changes']}",f"Motivo: {proposal['reason']}","Para aplicar: /ia aplicar <ID>"]
     return "\n".join(lines)
@@ -99,8 +104,7 @@ def _load_persisted_overrides():
     if not overrides:return
     applied={}
     for key,value in overrides.items():
-        if hasattr(config,key):
-            setattr(config,key,value); applied[key]=value
+        if hasattr(config,key):setattr(config,key,value); applied[key]=value
     if applied:config.validar()
 
 def _loop(broker):
