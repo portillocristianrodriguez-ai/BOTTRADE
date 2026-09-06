@@ -35,6 +35,49 @@ class ResearchLabTests(unittest.TestCase):
         self.assertEqual(summary["windows"], 2)
         self.assertEqual(summary["consistency_pct"], 0.0)
 
+    def test_walk_forward_selects_candidate_only_from_train_slice(self):
+        idx = pd.date_range("2026-01-01", periods=40, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "open": [100.0] * 40,
+            "high": [101.0] * 40,
+            "low": [99.0] * 40,
+            "close": [100.0] * 40,
+            "volume": [1000.0] * 40,
+        }, index=idx)
+        calls = []
+
+        def factory(params):
+            calls.append(dict(params))
+            return lambda _: "ESPERAR"
+
+        windows = walk_forward(
+            df,
+            train_bars=20,
+            test_bars=10,
+            parameter_grid=[{"risk_per_trade_pct": 0.01}, {"risk_per_trade_pct": 0.02}],
+            signal_factory=factory,
+            min_train_trades=0,
+        )
+        self.assertEqual(len(windows), 1)
+        self.assertIn(windows[0].selected_params, ({"risk_per_trade_pct": 0.01}, {"risk_per_trade_pct": 0.02}))
+        self.assertIsNotNone(windows[0].train_stats)
+        self.assertEqual(calls, [
+            {"risk_per_trade_pct": 0.01},
+            {"risk_per_trade_pct": 0.02},
+        ])
+
+    def test_walk_forward_requires_factory_for_parameter_grid(self):
+        idx = pd.date_range("2026-01-01", periods=12, freq="h", tz="UTC")
+        df = pd.DataFrame({
+            "open": [100.0] * 12,
+            "high": [101.0] * 12,
+            "low": [99.0] * 12,
+            "close": [100.0] * 12,
+            "volume": [1000.0] * 12,
+        }, index=idx)
+        with self.assertRaises(ValueError):
+            walk_forward(df, train_bars=6, test_bars=4, parameter_grid=[{}])
+
     def test_monte_carlo_requires_enough_trades(self):
         trade = Trade(0, 1, 100, 101, 1, 1, 1.0, "signal")
         with self.assertRaises(ValueError):
