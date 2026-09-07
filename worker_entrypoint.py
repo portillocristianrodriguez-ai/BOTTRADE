@@ -14,6 +14,8 @@ import telegram_hardening
 import telegram_startup_summary
 import telegram_webhook
 import worker
+import dynamic_exit_manager_v2
+import review_safety_hardening
 
 
 if __name__ == "__main__":
@@ -28,4 +30,5 @@ if __name__ == "__main__":
     pattern_dataset_cleaner.limpiar(bot.config)
     telegram_hardening.instalar(bot)
     telegram_webhook.instalar(bot)
+    review_safety_hardening.instalar(bot, dynamic_exit_manager_v2)
     worker.main()
