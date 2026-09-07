@@ -24,21 +24,21 @@ MANIFEST = r'''{
   "orientation": "portrait",
   "background_color": "#05080d",
   "theme_color": "#05080d",
-  "icons": []
+  "icons": [{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}]
 }'''
 
-SERVICE_WORKER = r'''const CACHE = "bottrade-pwa-ai-v1";
-self.addEventListener("install", event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(["/"])));
-  self.skipWaiting();
-});
+APP_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="42" fill="#101824"/><path d="M42 127V70M78 127V93M114 127V58M150 127V37" stroke="#9eb9ff" stroke-width="17" stroke-linecap="round"/><path d="M38 151h118" stroke="#e9eef7" stroke-width="7" stroke-linecap="round"/></svg>'
+
+SERVICE_WORKER = r'''const CACHE = "bottrade-workspace-v2";
+self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))));
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith("bottrade-")).map(k => caches.delete(k)))));
   self.clients.claim();
 });
+// Financial snapshots are never cached or replaced with old HTML offline.
 self.addEventListener("fetch", event => {
-  if (event.request.method !== "GET") return;
-  event.respondWith(fetch(event.request).catch(() => caches.match(event.request).then(r => r || caches.match("/"))));
+  if (event.request.mode !== "navigate") return;
+  event.respondWith(fetch(event.request).catch(() => new Response("<!doctype html><html lang='es'><meta name='viewport' content='width=device-width,initial-scale=1'><title>BOTTRADE · Sin conexión</title><body style='background:#080d16;color:#e9eef7;font:18px system-ui;padding:32px'><h1>Sin conexión</h1><p>Conéctate para consultar tu cartera. No se muestran saldos guardados como si fueran actuales.</p><button onclick='location.reload()'>Reintentar</button></body></html>",{headers:{'Content-Type':'text/html; charset=utf-8'}})));
 });
 '''
 
@@ -61,12 +61,12 @@ button { -webkit-tap-highlight-color: transparent; }
 
 AI_UI = r'''
 <div class="grid section ai-grid">
-<div class="card ai-panel"><div class="sectionhead"><h2>AI ANALYST</h2><span class="muted">read-only · Alpaca + estrategia</span></div>
+<div class="card ai-panel"><div class="sectionhead"><h2 id="assistantSection">Analista de la cartera</h2><span class="muted">Solo consulta · Alpaca</span></div>
 <div id="aiChat" class="ai-chat"><div class="ai-msg ai-bot">Soy el analista de BOTTRADE. Puedo revisar equity, drawdown, posiciones, ejecuciones y parámetros de estrategia. Puedo proponer cambios para probar, pero no ejecuto operaciones ni modifico la estrategia.</div></div>
-<div class="ai-form"><textarea id="aiQuestion" placeholder="Ej.: ¿Qué está funcionando peor y qué probarías primero?"></textarea><button id="aiAsk">Analizar</button></div>
+<div class="ai-form"><textarea aria-label="Pregunta al analista" id="aiQuestion" placeholder="Ej.: ¿Qué está funcionando peor y qué probarías primero?"></textarea><button id="aiAsk">Analizar</button></div>
 <div class="ai-suggestions"><button onclick="askAI('Analiza el rendimiento y el drawdown del periodo actual.')">Rendimiento</button><button onclick="askAI('Revisa las posiciones y la concentración de riesgo.')">Riesgo</button><button onclick="askAI('Compara SL, TP y trailing actuales y propone qué probar en backtest.')">SL/TP/trailing</button><button onclick="askAI('¿Qué cambio de estrategia probarías primero y por qué?')">Estrategia</button></div>
 </div>
-<div class="card ai-panel"><div class="sectionhead"><h2>EQUITY HISTORY</h2><span class="muted">tiempo · dinero · variación</span></div><div id="historyTable" class="table ai-table"><div class="empty">Cargando histórico…</div></div></div>
+<div class="card ai-panel"><div class="sectionhead"><h2>Histórico del patrimonio</h2><span class="muted">tiempo · dinero · variación</span></div><div id="historyTable" class="table ai-table"><div class="empty">Cargando histórico…</div></div></div>
 </div>
 '''
 
@@ -75,8 +75,9 @@ const aiHistory=[];
 function aiAdd(role,text){const box=document.getElementById('aiChat');const d=document.createElement('div');d.className='ai-msg '+(role==='user'?'ai-user':'ai-bot');d.textContent=text;box.appendChild(d);box.scrollTop=box.scrollHeight;}
 async function askAI(prefill){const input=document.getElementById('aiQuestion');if(prefill)input.value=prefill;const q=input.value.trim();if(!q)return;input.value='';aiAdd('user',q);const btn=document.getElementById('aiAsk');btn.disabled=true;btn.textContent='Analizando…';try{const r=await fetch('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,history:aiHistory.slice(-8),period:window.__bottradePeriod||'1D'})});const d=await r.json();if(!r.ok)throw new Error(d.error||'No se pudo consultar la IA');aiHistory.push({role:'user',content:q},{role:'assistant',content:d.answer});aiAdd('assistant',d.answer)}catch(e){aiAdd('assistant','Error: '+e.message)}finally{btn.disabled=false;btn.textContent='Analizar'}}
 document.getElementById('aiAsk').addEventListener('click',()=>askAI());document.getElementById('aiQuestion').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();askAI()}});
-async function loadHistoryTable(periodOverride){try{const p=periodOverride||window.__bottradePeriod||'1D';window.__bottradePeriod=p;const r=await fetch('/api/history?period='+encodeURIComponent(p),{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'histórico no disponible');const pts=d.points||[];if(!pts.length){document.getElementById('historyTable').innerHTML='<div class="empty">No hay histórico.</div>';return}const first=Number(pts[0].equity)||0;const rows=pts.slice().reverse().map((x,i,a)=>{const prev=i<a.length-1?Number(a[i+1].equity):Number(x.equity);const eq=Number(x.equity)||0;const delta=eq-prev;const ret=first?((eq/first)-1)*100:null;return `<tr><td>${esc(x.label||'')}</td><td>${money(eq)}</td><td class="${cls(delta)}">${money(delta)}</td><td class="${cls(ret)}">${pct(ret)}</td></tr>`}).join('');document.getElementById('historyTable').innerHTML='<table><thead><tr><th>Tiempo</th><th>Equity</th><th>Variación</th><th>Retorno</th></tr></thead><tbody>'+rows+'</tbody></table>'}catch(e){document.getElementById('historyTable').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
-const oldLoad=window.load;window.load=async function(){await oldLoad();loadHistoryTable(window.__bottradePeriod||'1D')};const oldSetPeriod=window.setPeriod;window.setPeriod=function(p,btn){window.__bottradePeriod=p;oldSetPeriod(p,btn);loadHistoryTable(p)};window.__bottradePeriod='1D';loadHistoryTable('1D');
+function renderHistoryTable(d){const pts=d.points||[];const box=document.getElementById('historyTable');if(!pts.length){box.innerHTML='<div class="empty">No hay histórico verificable para este periodo.</div>';return}const first=Number(pts[0].equity);const rows=pts.slice().reverse().map((x,i,a)=>{const prev=i<a.length-1?Number(a[i+1].equity):Number(x.equity);const eq=Number(x.equity),delta=eq-prev,ret=first>0?(eq/first-1)*100:null;return `<tr><td>${esc(x.label||'')}</td><td>${money(eq)}</td><td class="${cls(delta)}">${money(delta)}</td><td class="${cls(ret)}">${pct(ret)}</td></tr>`}).join('');box.innerHTML='<table><thead><tr><th>Fecha UTC</th><th>Patrimonio</th><th>Cambio entre muestras</th><th>Desde inicio</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+document.addEventListener('bottrade:state',event=>renderHistoryTable(event.detail.history));if(window.latestState)renderHistoryTable(window.latestState.history);
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 </script>'''
 
 dashboard.HTML = dashboard.HTML.replace("<title>BOTTRADE · PRO TERMINAL</title>", "<title>BOTTRADE · PRO TERMINAL</title>" + PWA_HEAD)
@@ -103,6 +104,10 @@ class AIHandler(BaseHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path in {"/", "/index.html"}:
+            self.send(200, dashboard.HTML.encode("utf-8"), "text/html; charset=utf-8"); return
+        if path == "/icon.svg":
+            self.send(200, APP_ICON.encode(), "image/svg+xml"); return
         if path == "/manifest.json":
             data = MANIFEST.encode("utf-8")
             self.send_response(200); self.send_header("Content-Type", "application/manifest+json; charset=utf-8"); self.send_header("Cache-Control", "public, max-age=3600"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
