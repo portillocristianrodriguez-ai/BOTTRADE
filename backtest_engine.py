@@ -30,17 +30,8 @@ class Trade:
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
-    required = ["open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Faltan columnas OHLCV: {missing}")
-    out = df.copy()
-    for c in required:
-        out[c] = pd.to_numeric(out[c], errors="coerce")
-    out = out.dropna(subset=required).sort_index()
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index, utc=True)
-    return out
+    from simulation_data import clean_ohlcv
+    return clean_ohlcv(df)
 
 
 def _max_drawdown(equity: pd.Series) -> float:
@@ -140,7 +131,7 @@ def run(
     sl = float(config.STOP_LOSS_PCT if stop_loss_pct is None else stop_loss_pct)
     tp = float(config.TAKE_PROFIT_PCT if take_profit_pct is None else take_profit_pct)
     trail = float(config.TRAILING_STOP_PCT if trailing_stop_pct is None else trailing_stop_pct)
-    if not (0 < risk <= 1 and 0 < sl < 1 and 0 < tp < 10 and 0 <= fee_bps < 1000 and 0 <= slippage_bps < 1000):
+    if not (math.isfinite(initial_cash) and initial_cash > 0 and 0 < risk <= 1 and 0 < sl < 1 and 0 < tp < 10 and 0 <= trail < 1 and 0 <= fee_bps < 1000 and 0 <= slippage_bps < 1000):
         raise ValueError("Parámetros de backtest inválidos.")
 
     signal_fn = signal_fn or estrategia.generar_senal
@@ -157,21 +148,25 @@ def run(
         # Una señal de la vela anterior deja una orden pendiente. Solo aquí,
         # al llegar la vela siguiente, se ejecuta y se descuenta el efectivo.
         if pending_entry is not None and i == pending_entry["index"]:
-            total = pending_entry["qty"] * pending_entry["entry"] + pending_entry["entry_fee"]
-            if total <= cash:
-                cash -= total
-                position = pending_entry
+            entry = float(row["open"]) * (1.0 + slippage_bps / 10000.0)
+            qty = min(pending_entry["qty"], cash / (entry * (1 + fee_bps / 10000.0)))
+            entry_fee = qty * entry * fee_bps / 10000.0
+            if qty > 0:
+                cash -= qty * entry + entry_fee
+                position = dict(pending_entry, entry=entry, qty=qty, entry_fee=entry_fee,
+                                stop=entry*(1-sl), target=entry*(1+tp),
+                                trail=entry*(1-trail) if trail else 0.0, peak=entry,
+                                pending_exit=False)
             pending_entry = None
 
         if position is not None:
-            if price > position["peak"]:
-                position["peak"] = price
-                position["trail"] = max(position["trail"], price * (1.0 - trail))
             stop = max(position["stop"], position["trail"])
             reason = None
             exit_price = None
-            if float(row["low"]) <= stop:
-                reason, exit_price = "stop", stop
+            if position.get("pending_exit"):
+                reason, exit_price = "signal", float(row["open"])
+            elif float(row["low"]) <= stop:
+                reason, exit_price = "stop", min(stop, float(row["open"]))
             elif float(row["high"]) >= position["target"]:
                 reason, exit_price = "take_profit", position["target"]
             else:
@@ -180,15 +175,20 @@ def run(
                 except Exception:
                     sig = "ESPERAR"
                 if sig == "VENDER":
-                    reason, exit_price = "signal", price
+                    position["pending_exit"] = True
             if reason is not None:
                 exit_price *= 1.0 - slippage_bps / 10000.0
                 gross = position["qty"] * (exit_price - position["entry"])
                 fees = (position["qty"] * position["entry"] + position["qty"] * exit_price) * fee_bps / 10000.0
                 pnl = gross - fees
-                trades.append(Trade(position["entry_time"], data.index[i], position["entry"], exit_price, position["qty"], pnl, (exit_price / position["entry"] - 1.0) * 100.0, reason))
-                cash += position["qty"] * exit_price - fees
+                trades.append(Trade(position["entry_time"], data.index[i], position["entry"], exit_price, position["qty"], pnl, pnl / (position["qty"] * position["entry"]) * 100.0, reason))
+                cash += position["qty"] * exit_price * (1-fee_bps/10000.0)
                 position = None
+
+        # A close-based trailing update is effective only on the NEXT bar.
+        if position is not None and trail and price > position["peak"]:
+            position["peak"] = price
+            position["trail"] = max(position["trail"], price * (1-trail))
 
         # La señal de la vela i solo puede abrir en i+1. Se programa la
         # entrada, pero no se reserva cash ni se altera equity en esta vela.
@@ -198,10 +198,10 @@ def run(
             except Exception:
                 sig = "ESPERAR"
             if sig == "COMPRAR":
-                next_open = float(data.iloc[i + 1]["open"]) * (1.0 + slippage_bps / 10000.0)
+                next_open = price  # sizing uses only the signal bar; execution reprices next open
                 stop_distance = next_open * sl
                 risk_cash = cash * risk
-                qty = min(risk_cash / stop_distance, cash / next_open) if stop_distance > 0 else 0.0
+                qty = min(risk_cash / stop_distance, cash / (next_open * (1+fee_bps/10000.0))) if stop_distance > 0 else 0.0
                 if qty > 0:
                     fees = qty * next_open * fee_bps / 10000.0
                     total = qty * next_open + fees
@@ -228,8 +228,8 @@ def run(
         last = float(data.iloc[-1]["close"]) * (1.0 - slippage_bps / 10000.0)
         fees = (position["qty"] * position["entry"] + position["qty"] * last) * fee_bps / 10000.0
         pnl = position["qty"] * (last - position["entry"]) - fees
-        trades.append(Trade(position["entry_time"], data.index[-1], position["entry"], last, position["qty"], pnl, (last / position["entry"] - 1.0) * 100.0, "end_of_data"))
-        cash += position["qty"] * last - fees
+        trades.append(Trade(position["entry_time"], data.index[-1], position["entry"], last, position["qty"], pnl, pnl / (position["qty"] * position["entry"]) * 100.0, "end_of_data"))
+        cash += position["qty"] * last * (1-fee_bps/10000.0)
         equity_rows[-1] = (data.index[-1], cash)
 
     equity = pd.Series(dict(equity_rows), dtype=float).sort_index()

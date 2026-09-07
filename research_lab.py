@@ -63,7 +63,7 @@ def walk_forward(
     best candidate is chosen strictly from the training slice and then evaluated
     once on the following unseen test slice. Nothing is promoted automatically.
     """
-    data = df.sort_index()
+    data = backtest_engine._clean(df)
     if train_bars < 2 or test_bars < 2:
         raise ValueError("train_bars y test_bars deben ser >= 2")
     if min_train_trades < 0:
@@ -109,9 +109,14 @@ def walk_forward(
                 candidates, key=lambda item: item[0]
             )
 
+        # Only past training bars are supplied as indicator warm-up. No trades
+        # occur during warm-up; the test account starts with fresh initial cash.
+        original_signal = selected_signal or backtest_engine.estrategia.generar_senal
+        def contextual_signal(hist, _past=train, _signal=original_signal):
+            return _signal(pd.concat([_past, hist]))
         try:
             stats, _, _ = backtest_engine.run(
-                test, signal_fn=selected_signal, **selected_kwargs
+                test, signal_fn=contextual_signal, **selected_kwargs
             )
         except (TypeError, ValueError):
             start += step
@@ -137,7 +142,7 @@ def summarize_walk_forward(windows: list[WalkForwardWindow]) -> dict:
         return {
             "windows": 0,
             "consistency_pct": 0.0,
-            "oos_degradation_pct": 0.0,
+            "oos_degradation_pct": None,
         }
     returns = np.array([float(w.stats.get("total_return_pct", 0.0)) for w in windows])
     positive = int(np.sum(returns > 0))
@@ -146,7 +151,7 @@ def summarize_walk_forward(windows: list[WalkForwardWindow]) -> dict:
     )
     mean_train = float(train_returns.mean()) if len(train_returns) else 0.0
     mean_oos = float(returns.mean())
-    degradation = max(0.0, (mean_train - mean_oos) / abs(mean_train) * 100.0) if mean_train else 0.0
+    degradation = max(0.0, (mean_train - mean_oos) / abs(mean_train) * 100.0) if mean_train else None
     return {
         "windows": len(windows),
         "consistency_pct": positive / len(windows) * 100.0,
@@ -172,7 +177,18 @@ def monte_carlo(
     """
     if simulations < 100:
         raise ValueError("simulations debe ser >= 100")
-    returns = np.array([float(t.return_pct) / 100.0 for t in trades], dtype=float)
+    if not np.isfinite(initial_cash) or initial_cash <= 0:
+        raise ValueError('initial_cash must be positive and finite')
+    # Net P&L relative to account equity, not a fully leveraged asset return.
+    capital = float(initial_cash)
+    values = []
+    for trade in trades:
+        pnl = float(trade.pnl)
+        if not np.isfinite(pnl) or capital <= 0 or capital+pnl <= 0:
+            raise ValueError('Invalid or insolvent trade path')
+        values.append(pnl/capital)
+        capital += pnl
+    returns = np.array(values, dtype=float)
     if len(returns) < 2:
         raise ValueError("Se necesitan al menos 2 trades para Monte Carlo")
     horizon = int(horizon_trades or len(returns))
@@ -182,6 +198,7 @@ def monte_carlo(
     sampled = rng.choice(returns, size=(simulations, horizon), replace=True)
     equity = float(initial_cash) * np.cumprod(1.0 + sampled, axis=1)
     final_returns = equity[:, -1] / float(initial_cash) - 1.0
+    equity = np.column_stack([np.full(simulations,initial_cash), equity])
     peaks = np.maximum.accumulate(equity, axis=1)
     drawdowns = equity / peaks - 1.0
     max_dd = drawdowns.min(axis=1)

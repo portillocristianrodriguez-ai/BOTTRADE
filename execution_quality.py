@@ -7,6 +7,7 @@ recommended notional for the proposed BUY.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 
@@ -64,11 +65,12 @@ def evaluate_crypto_orderbook(
     min_top_depth_usd: float = 1500.0,
     max_depth_ratio: float = 0.60,
     min_execution_notional_usd: float = 25.0,
+    max_book_age_seconds: float = 30.0,
 ) -> Dict[str, Any]:
     """Evalúa spread, profundidad, imbalance e impacto y propone un tamaño ejecutable."""
     proposed = max(0.0, _num(proposed_notional))
     result = {
-        "ok": True,
+        "ok": False,
         "reason": "disabled_or_unavailable",
         "spread_pct": None,
         "top_ask_depth_usd": None,
@@ -76,7 +78,7 @@ def evaluate_crypto_orderbook(
         "depth_ratio": None,
         "book_imbalance": None,
         "estimated_impact_pct": None,
-        "recommended_notional": proposed,
+        "recommended_notional": 0.0,
     }
     try:
         if data_client is None or proposed <= 0:
@@ -94,8 +96,25 @@ def evaluate_crypto_orderbook(
             result["reason"] = "orderbook_missing"
             return result
 
-        asks = list(getattr(book, "asks", []) or [])
-        bids = list(getattr(book, "bids", []) or [])
+        def field(name, default=None):
+            return book.get(name, default) if isinstance(book, dict) else getattr(book, name, default)
+        stamp = field('timestamp')
+        try:
+            stamp = stamp if isinstance(stamp, datetime) else datetime.fromisoformat(str(stamp).replace('Z','+00:00'))
+            if stamp.tzinfo is None:
+                raise ValueError('timestamp must include timezone')
+            age = (datetime.now(timezone.utc)-stamp).total_seconds()
+            if age < -5 or age > max_book_age_seconds:
+                result['reason'] = 'stale_orderbook'
+                return result
+        except (ValueError, TypeError):
+            result['reason'] = 'missing_orderbook_timestamp'
+            return result
+        asks = sorted(list(field('asks', []) or []), key=lambda l: _level_price_size(l)[0])
+        bids = sorted(list(field('bids', []) or []), key=lambda l: _level_price_size(l)[0], reverse=True)
+        if any(p <= 0 or q <= 0 for p,q in map(_level_price_size, asks+bids)):
+            result['reason'] = 'invalid_orderbook_level'
+            return result
         if not asks or not bids:
             result["reason"] = "empty_orderbook"
             return result
@@ -166,6 +185,13 @@ def evaluate_crypto_orderbook(
             result["recommended_notional"] = recommended
             return result
 
+        final_impact, remaining = _vwap_impact(asks, recommended, mid)
+        if final_impact is None or remaining > 1e-8 or final_impact > impact_limit:
+            result['reason'] = 'unsafe_resized_order'
+            result['recommended_notional'] = 0.0
+            return result
+        result['ok'] = True
+        result['estimated_impact_pct'] = final_impact
         result["recommended_notional"] = recommended
         if recommended < proposed and result["reason"] == "ok":
             result["reason"] = "reduced_for_depth"

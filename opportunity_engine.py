@@ -5,6 +5,7 @@ no modifica configuración y no sustituye los guards de riesgo.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping
 
 
@@ -15,7 +16,7 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 def _num(value: Any, default: float = 0.0) -> float:
     try:
         value = float(value)
-        return value if value == value else default
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
@@ -77,7 +78,7 @@ def evaluate(signal: Mapping[str, Any], regime: Mapping[str, Any] | None = None,
     score -= quality_penalty
 
     score = round(_clamp(score), 2)
-    hard_block = bool(signal.get("data_invalid")) or bool(execution.get("blocked"))
+    hard_block = bool(signal.get("data_invalid")) or bool(execution.get("blocked")) or execution.get("ok") is False
     if regime_name == "bajista" and base < 84.0:
         hard_block = True
 

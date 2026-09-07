@@ -7,6 +7,7 @@ config cuando están disponibles.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, asdict
 from typing import Callable, Mapping
 
@@ -29,17 +30,8 @@ class PortfolioTrade:
 
 
 def _clean(df: pd.DataFrame) -> pd.DataFrame:
-    required = ["open", "high", "low", "close", "volume"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"{missing=}")
-    out = df.copy()
-    for col in required:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-    out = out.dropna(subset=required).sort_index()
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index, utc=True)
-    return out
+    from simulation_data import clean_ohlcv
+    return clean_ohlcv(df)
 
 
 def run_portfolio(
@@ -67,7 +59,7 @@ def run_portfolio(
     max_pos = int(getattr(config, "MAX_POSICIONES_ABIERTAS", 3) if max_positions is None else max_positions)
     max_expo = float(getattr(config, "MAX_TOTAL_EXPOSURE_PCT", 0.50) if max_total_exposure_pct is None else max_total_exposure_pct)
     max_single = float(getattr(config, "MAX_SINGLE_POSITION_PCT", 0.20) if max_single_position_pct is None else max_single_position_pct)
-    if not (initial_cash > 0 and 0 < risk <= 1 and 0 < sl < 1 and 0 < tp < 10 and 0 <= fee_bps < 1000 and 0 <= slippage_bps < 1000):
+    if not (math.isfinite(initial_cash) and initial_cash > 0 and 0 < risk <= 1 and 0 < sl < 1 and 0 < tp < 10 and 0 <= trail < 1 and 0 <= fee_bps < 1000 and 0 <= slippage_bps < 1000):
         raise ValueError("Parámetros de portfolio backtest inválidos.")
     if not (1 <= max_pos and 0 < max_expo <= 1 and 0 < max_single <= 1):
         raise ValueError("Límites de portfolio inválidos.")
@@ -91,12 +83,15 @@ def run_portfolio(
                 value += pos["qty"] * float(available.iloc[-1]["close"])
         return value
 
-    def exposure_at(timestamp):
+    def exposure_at(timestamp, before=False):
         exposure = 0.0
         for symbol, pos in positions.items():
             frame = frames[symbol]
-            available = frame.loc[:timestamp]
-            px = pos["entry"] if available.empty else float(available.iloc[-1]["close"])
+            available = frame.loc[frame.index < timestamp] if before else frame.loc[:timestamp]
+            if before and timestamp in frame.index:
+                px = float(frame.loc[timestamp, "open"])
+            else:
+                px = pos["entry"] if available.empty else float(available.iloc[-1]["close"])
             exposure += pos["qty"] * px
         return exposure
 
@@ -107,11 +102,19 @@ def run_portfolio(
             frame = frames[symbol]
             if timestamp != order["entry_time"] or timestamp not in frame.index:
                 continue
-            total = order["qty"] * order["entry"] + order["entry_fee"]
-            current_exposure = exposure_at(timestamp)
-            if len(positions) < max_pos and total <= cash and current_exposure + total <= initial_cash * max_expo:
-                cash -= total
-                positions[symbol] = order
+            entry = float(frame.loc[timestamp, "open"]) * (1+slippage_bps/10000.0)
+            current_exposure = exposure_at(timestamp, before=True)
+            equity_before = cash + current_exposure
+            budget = min(cash/(1+fee_bps/10000.0), equity_before*max_single,
+                         max(0.0,equity_before*max_expo-current_exposure))
+            qty = min(order["qty"], budget/entry)
+            fee = qty*entry*fee_bps/10000.0
+            if len(positions) < max_pos and qty > 0:
+                cash -= qty*entry+fee
+                positions[symbol] = dict(order, entry=entry, qty=qty, entry_fee=fee,
+                                         stop=entry*(1-sl), target=entry*(1+tp),
+                                         trail=entry*(1-trail) if trail else 0.0, peak=entry,
+                                         pending_exit=False)
             del pending[symbol]
 
         # Gestionar posiciones activas. Si stop y TP se tocan en la misma vela,
@@ -123,14 +126,13 @@ def run_portfolio(
             row = frame.loc[timestamp]
             pos = positions[symbol]
             close = float(row["close"])
-            if close > pos["peak"]:
-                pos["peak"] = close
-                pos["trail"] = max(pos["trail"], close * (1.0 - trail))
             stop = max(pos["stop"], pos["trail"])
             reason = None
             exit_price = None
-            if float(row["low"]) <= stop:
-                reason, exit_price = "stop", stop
+            if pos.get("pending_exit"):
+                reason, exit_price = "signal", float(row["open"])
+            elif float(row["low"]) <= stop:
+                reason, exit_price = "stop", min(stop, float(row["open"]))
             elif float(row["high"]) >= pos["target"]:
                 reason, exit_price = "take_profit", pos["target"]
             else:
@@ -140,15 +142,18 @@ def run_portfolio(
                 except Exception:
                     sig = "ESPERAR"
                 if sig == "VENDER":
-                    reason, exit_price = "signal", close
+                    pos["pending_exit"] = True
             if reason is not None:
                 exit_price *= 1.0 - slippage_bps / 10000.0
                 gross = pos["qty"] * (exit_price - pos["entry"])
                 fees = (pos["qty"] * pos["entry"] + pos["qty"] * exit_price) * fee_bps / 10000.0
                 pnl = gross - fees
-                trades.append(PortfolioTrade(symbol, pos["entry_time"], timestamp, pos["entry"], exit_price, pos["qty"], pnl, (exit_price / pos["entry"] - 1.0) * 100.0, reason))
-                cash += pos["qty"] * exit_price - fees
+                trades.append(PortfolioTrade(symbol, pos["entry_time"], timestamp, pos["entry"], exit_price, pos["qty"], pnl, pnl / (pos["qty"] * pos["entry"]) * 100.0, reason))
+                cash += pos["qty"] * exit_price * (1-fee_bps/10000.0)
                 del positions[symbol]
+            elif trail and close > pos["peak"]:
+                pos["peak"] = close
+                pos["trail"] = max(pos["trail"], close*(1-trail))
 
         # Programar nuevas entradas. Nunca se ejecutan en la misma vela de señal.
         for symbol in symbols:
@@ -167,16 +172,16 @@ def run_portfolio(
                 sig = "ESPERAR"
             if sig != "COMPRAR":
                 continue
-            next_open = float(frame.iloc[int(loc) + 1]["open"]) * (1.0 + slippage_bps / 10000.0)
+            next_open = float(frame.loc[timestamp,"close"])  # no future price in sizing
             if next_open <= 0:
                 continue
             stop_distance = next_open * sl
             risk_cash = cash * risk
             qty_by_risk = risk_cash / stop_distance if stop_distance > 0 else 0.0
-            qty_by_cash = cash * max_single / next_open
+            qty_by_cash = min(cash/(1+fee_bps/10000.0), equity_at(timestamp)*max_single) / next_open
             qty = min(qty_by_risk, qty_by_cash)
             current_exposure = exposure_at(timestamp)
-            qty_by_portfolio = max(0.0, (initial_cash * max_expo - current_exposure) / next_open)
+            qty_by_portfolio = max(0.0, (equity_at(timestamp) * max_expo - current_exposure) / next_open)
             qty = min(qty, qty_by_portfolio)
             if qty <= 0:
                 continue
@@ -202,8 +207,8 @@ def run_portfolio(
         last = float(frame.iloc[-1]["close"]) * (1.0 - slippage_bps / 10000.0)
         fees = (pos["qty"] * pos["entry"] + pos["qty"] * last) * fee_bps / 10000.0
         pnl = pos["qty"] * (last - pos["entry"]) - fees
-        trades.append(PortfolioTrade(symbol, pos["entry_time"], frame.index[-1], pos["entry"], last, pos["qty"], pnl, (last / pos["entry"] - 1.0) * 100.0, "end_of_data"))
-        cash += pos["qty"] * last - fees
+        trades.append(PortfolioTrade(symbol, pos["entry_time"], frame.index[-1], pos["entry"], last, pos["qty"], pnl, pnl / (pos["qty"] * pos["entry"]) * 100.0, "end_of_data"))
+        cash += pos["qty"] * last * (1-fee_bps/10000.0)
     if equity_rows:
         equity_rows[-1] = (equity_rows[-1][0], cash)
 

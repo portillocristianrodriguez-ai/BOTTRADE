@@ -1,12 +1,16 @@
 """Configuración central de BOTTRADE."""
 import os
+import math
 
 def _bool(nombre, default):
     valor = os.environ.get(nombre)
     return default if valor is None else valor.strip().lower() in ("true", "1", "yes", "si", "sí", "on")
 
 def _float(nombre, default):
-    try: return float(os.environ.get(nombre, default))
+    try:
+        value = float(os.environ.get(nombre, default))
+        if not math.isfinite(value): raise ValueError("non-finite")
+        return value
     except (TypeError, ValueError) as exc: raise RuntimeError(f"{nombre} debe ser un número.") from exc
 
 def _int(nombre, default):

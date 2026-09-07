@@ -13,7 +13,11 @@ def calcular_indicadores(df):
             return pd.DataFrame()
         df[columna] = pd.to_numeric(df[columna], errors="coerce")
     df[columnas_numericas] = df[columnas_numericas].replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=["open", "high", "low", "close"]).sort_index()
+    prices = df[["open", "high", "low", "close"]]
+    if (prices.isna().any().any() or (prices <= 0).any().any() or df.index.has_duplicates
+        or (df["high"] < prices.max(axis=1)).any() or (df["low"] > prices.min(axis=1)).any()):
+        return pd.DataFrame()
+    df = df.sort_index()
     df["volume"] = df["volume"].where(df["volume"] >= 0)
     if df.empty:
         return df
@@ -51,7 +55,11 @@ def _obtener_indice_barra_crypto(df):
             return None
         ultimo = indices_validos[-1]
         posiciones = df.index.get_indexer([ultimo])
-        return int(posiciones[0]) if len(posiciones) and posiciones[0] >= 0 else None
+        if not len(posiciones) or posiciones[0] < 0:
+            return None
+        index = int(posiciones[0])
+        # Do not revive a signal from an arbitrarily old positive-volume bar.
+        return index if len(df)-1-index <= 2 else None
     except Exception:
         return None
 

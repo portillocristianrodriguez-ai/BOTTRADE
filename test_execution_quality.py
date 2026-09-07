@@ -5,6 +5,7 @@ Run with: python -m unittest test_execution_quality.py
 
 import unittest
 
+from datetime import datetime, timezone
 import execution_quality
 
 
@@ -16,6 +17,7 @@ class Level:
 
 class Book:
     def __init__(self, asks, bids):
+        self.timestamp = datetime.now(timezone.utc)
         self.asks = asks
         self.bids = bids
 
@@ -64,11 +66,11 @@ class ExecutionQualityTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertLess(result["recommended_notional"], 5000)
 
-    def test_missing_data_is_non_blocking(self):
+    def test_missing_data_blocks(self):
         result = execution_quality.evaluate_crypto_orderbook(
             None, "BTC/USD", 5000,
         )
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "unavailable")
 
 

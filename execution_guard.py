@@ -39,14 +39,19 @@ def _float(value, default: float = 0.0) -> float:
 
 
 def posicion_notional(position) -> float:
-    if _float(getattr(position, "qty", None), None) == 0:
+    raw_qty = getattr(position, "qty", None)
+    qty = _float(raw_qty, None)
+    if raw_qty is not None and qty is None:
+        return float('inf')
+    if qty == 0:
         return 0.0
-    market_value = abs(_float(getattr(position, "market_value", 0)))
-    if market_value > 0:
-        return market_value
-    qty = abs(_float(getattr(position, "qty", 0)))
-    price = _float(getattr(position, "current_price", 0))
-    return qty * price
+    market_value = _float(getattr(position, "market_value", None), None)
+    if market_value is not None and abs(market_value) > 0:
+        return abs(market_value)
+    price = _float(getattr(position, "current_price", None), None)
+    if qty is not None and price is not None and price > 0:
+        return abs(qty) * price
+    return float('inf')  # Unknown exposure cannot authorize another purchase.
 
 
 def orden_buy_notional(order, unknown_as: float = float("inf")) -> float:

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import execution_quality
 
 
@@ -9,6 +10,7 @@ class Level:
 
 class Book:
     def __init__(self, asks, bids):
+        self.timestamp = datetime.now(timezone.utc)
         self.asks = asks
         self.bids = bids
 
@@ -43,7 +45,7 @@ def test_thin_book_reduces_oversized_order():
     assert 25 <= result["recommended_notional"] <= 100.10 * 10 * 0.60
 
 
-def test_missing_client_is_non_blocking():
+def test_missing_client_blocks():
     result = execution_quality.evaluate_crypto_orderbook(None, "BTC/USD", 5000)
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["reason"] == "unavailable"

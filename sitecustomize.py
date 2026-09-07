@@ -40,13 +40,15 @@ def _execution_quality_notional(broker_module, ticker, proposed):
             f"top_depth=${quality.get('top_ask_depth_usd')} ratio={quality.get('depth_ratio')} "
             f"impact={quality.get('estimated_impact_pct')} reason={quality.get('reason')}"
         )
-        if not quality.get("ok", True):
+        if not quality.get("ok", False):
             return 0.0, str(quality.get("reason", "blocked"))
-        recommended = float(quality.get("recommended_notional", proposed) or proposed)
+        recommended = float(quality.get("recommended_notional", 0) or 0)
+        if not math.isfinite(recommended):
+            return 0.0, "invalid_recommendation"
         return min(proposed, max(0.0, recommended)), str(quality.get("reason", "ok"))
     except Exception as exc:
         broker_module.log.warning(f"[EXEC] {ticker}: control de calidad no disponible: {exc}")
-        return proposed, "unavailable"
+        return 0.0, "unavailable"
 
 
 def _normalizar_qty_crypto(broker_module, ticker, qty):
