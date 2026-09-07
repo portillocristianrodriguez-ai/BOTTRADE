@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from dashboard_metrics import active_positions, flatten_orders, number, stop_risk
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8080"))
@@ -44,10 +45,10 @@ HTML = r'''<!doctype html>
 </div>
 <div class="grid section">
 <div class="card wide7"><div class="sectionhead"><h2>OPEN POSITIONS</h2><span id="possummary" class="muted">—</span></div><div id="positions" class="table"><div class="empty">Cargando…</div></div></div>
-<div class="card side5"><div class="sectionhead"><h2>RISK &amp; EXPOSURE</h2><span class="muted">visible desde cuenta</span></div><div class="two"><div class="metric"><div class="label">Gross exposure</div><b id="invested">—</b></div><div class="metric"><div class="label">Unrealized P&amp;L</div><b id="unrealized">—</b></div><div class="metric"><div class="label">Largest position</div><b id="largest">—</b></div><div class="metric"><div class="label">Concentration</div><b id="concentration">—</b></div></div><div style="height:9px"></div><div class="bars"><div class="barrow"><span>Stocks</span><div class="bar"><i id="stockbar" style="width:0%"></i></div><b id="stockpct">—</b></div><div class="barrow"><span>Crypto</span><div class="bar"><i id="cryptobar" style="width:0%"></i></div><b id="cryptopct">—</b></div><div class="barrow"><span>Cash</span><div class="bar"><i id="cashbar" style="width:0%"></i></div><b id="cashpct">—</b></div></div></div>
+<div class="card side5"><div class="sectionhead"><h2>RISK &amp; EXPOSURE</h2><span class="muted">visible desde cuenta</span></div><div class="two"><div class="metric"><div class="label">Gross exposure</div><b id="invested">—</b></div><div class="metric"><div class="label">Unrealized P&amp;L</div><b id="unrealized">—</b></div><div class="metric"><div class="label">Largest position</div><b id="largest">—</b></div><div class="metric"><div class="label">Concentration</div><b id="concentration">—</b></div><div class="metric"><div class="label">Max Loss if all stops hit</div><b id="maxstoploss">—</b><div id="stopnote" class="meta"></div></div></div><div style="height:9px"></div><div class="bars"><div class="barrow"><span>Stocks</span><div class="bar"><i id="stockbar" style="width:0%"></i></div><b id="stockpct">—</b></div><div class="barrow"><span>Crypto</span><div class="bar"><i id="cryptobar" style="width:0%"></i></div><b id="cryptopct">—</b></div><div class="barrow"><span>Cash</span><div class="bar"><i id="cashbar" style="width:0%"></i></div><b id="cashpct">—</b></div></div></div>
 </div>
 <div class="grid section">
-<div class="card side5"><div class="sectionhead"><h2>EXECUTION CENTER</h2><span id="execmeta" class="muted">—</span></div><div class="two"><div class="metric"><div class="label">Fills</div><b id="fillsn">—</b></div><div class="metric"><div class="label">Buy / Sell</div><b id="buysell">—</b></div><div class="metric"><div class="label">Filled orders</div><b id="filledorders">—</b></div><div class="metric"><div class="label">Open orders</div><b id="execopen">—</b></div></div></div>
+<div class="card side5"><div class="sectionhead"><h2>EXECUTION CENTER</h2><span id="execmeta" class="muted">—</span></div><div class="two"><div class="metric"><div class="label">Fills</div><b id="fillsn">—</b></div><div class="metric"><div class="label">Buy / Sell</div><b id="buysell">—</b></div><div class="metric"><div class="label">Orders with fills</div><b id="filledorders">—</b></div><div class="metric"><div class="label">Open orders</div><b id="execopen">—</b></div></div></div>
 <div class="card side5"><div class="sectionhead"><h2>ACCOUNT TELEMETRY</h2><span class="muted">Alpaca</span></div><div class="health"><div class="metric"><div class="label">Broker API</div><div id="apihealth" class="status"><i class="statusdot"></i>—</div></div><div class="metric"><div class="label">Trading mode</div><div id="modehealth" class="status"><i class="statusdot"></i>—</div></div><div class="metric"><div class="label">Market clock</div><div id="clockhealth" class="status"><i class="statusdot"></i>—</div></div><div class="metric"><div class="label">Data history</div><div id="historyhealth" class="status"><i class="statusdot"></i>—</div></div></div></div>
 </div>
 <div class="section card"><div class="sectionhead"><h2>RECENT ORDERS</h2><span id="ordersmeta" class="muted">—</span></div><div id="orders" class="table"><div class="empty">Cargando…</div></div></div>
@@ -67,7 +68,7 @@ function renderFills(items){if(!items?.length)return '<div class="empty">Sin fil
 function drawChart(points){const el=document.getElementById('chart');if(!points?.length){el.innerHTML='<div class="empty">No hay suficiente historial para este periodo.</div>';return}const vals=points.map(x=>Number(x.equity)).filter(Number.isFinite);if(vals.length<2){el.innerHTML='<div class="empty">Historial insuficiente.</div>';return}const w=1000,h=235,p=24,min=Math.min(...vals),max=Math.max(...vals),span=max-min||1;const xy=vals.map((v,i)=>[p+(i/(vals.length-1))*(w-2*p),h-p-((v-min)/span)*(h-2*p)]);const path=xy.map((a,i)=>(i?'L':'M')+a[0].toFixed(1)+' '+a[1].toFixed(1)).join(' ');const area=path+' L '+xy.at(-1)[0].toFixed(1)+' '+(h-p)+' L '+xy[0][0].toFixed(1)+' '+(h-p)+' Z';el.innerHTML=`<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><line class="gridline" x1="${p}" y1="${p}" x2="${w-p}" y2="${p}"/><line class="gridline" x1="${p}" y1="${h/2}" x2="${w-p}" y2="${h/2}"/><line class="gridline" x1="${p}" y1="${h-p}" x2="${w-p}" y2="${h-p}"/><path class="chartarea" d="${area}"/><path class="chartline" d="${path}"/><text class="axis" x="${p}" y="14">${money(max)}</text><text class="axis" x="${p}" y="${h/2-4}">${money((max+min)/2)}</text><text class="axis" x="${p}" y="${h-3}">${money(min)}</text><text class="axis" x="${w-p-110}" y="14">${esc(points.at(-1).label||'now')}</text></svg>`}
 function setPeriod(p,btn){period=p;document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));btn.classList.add('active');load()}
 function setHealth(id,ok,text){const el=document.getElementById(id);el.innerHTML=`<i class="statusdot" style="background:${ok?'var(--good)':'var(--bad)'}"></i>${esc(text)}`}
-async function load(){try{const r=await fetch('/api/state?period='+period,{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'No se pudo cargar el estado');document.getElementById('error').style.display='none';document.getElementById('mode').innerHTML='<span class="dot"></span>'+esc(d.mode);document.getElementById('broker').textContent='Broker: '+(d.health?'OK':'ERROR');document.getElementById('market').textContent='Market: '+esc(d.clock.status);document.getElementById('updated').textContent=new Date(d.timestamp).toLocaleTimeString();document.getElementById('equity').textContent=money(d.account.equity);document.getElementById('cash').textContent=money(d.account.cash);document.getElementById('bp').textContent=money(d.account.buying_power);document.getElementById('pnl').textContent=money(d.account.day_pnl);document.getElementById('pnl').className='value '+cls(d.account.day_pnl);document.getElementById('pnlmeta').textContent=d.account.day_pnl_source;document.getElementById('poscount').textContent=d.positions.length;document.getElementById('opencount').textContent=d.open_orders;document.getElementById('positions').innerHTML=renderPositions(d.positions);document.getElementById('orders').innerHTML=renderOrders(d.orders);document.getElementById('fills').innerHTML=renderFills(d.fills);document.getElementById('ordersmeta').textContent=d.orders.length+' visibles · '+d.open_orders+' abiertas';document.getElementById('possummary').textContent=money(d.risk.invested)+' gross exposure';document.getElementById('invested').textContent=money(d.risk.invested);document.getElementById('unrealized').textContent=money(d.risk.unrealized);document.getElementById('unrealized').className=Number(d.risk.unrealized)>=0?'good':'bad';document.getElementById('largest').textContent=d.risk.largest_symbol||'—';document.getElementById('concentration').textContent=d.risk.concentration==null?'—':d.risk.concentration.toFixed(1)+'%';['stock','crypto','cash'].forEach(k=>{document.getElementById(k+'bar').style.width=Math.min(100,d.risk[k+'pct']||0)+'%';document.getElementById(k+'pct').textContent=(d.risk[k+'pct']??0).toFixed(1)+'%' });document.getElementById('fillsn').textContent=d.execution.fills;document.getElementById('buysell').textContent=d.execution.buys+' / '+d.execution.sells;document.getElementById('filledorders').textContent=d.execution.filled_orders;document.getElementById('execopen').textContent=d.open_orders;document.getElementById('execmeta').textContent=d.execution.window;setHealth('apihealth',d.health,'Connected');setHealth('modehealth',true,d.mode);setHealth('clockhealth',true,d.clock.status+(d.clock.is_open?' · open':' · closed'));setHealth('historyhealth',d.history.status==='OK',d.history.status);drawChart(d.history.points);document.getElementById('ret').textContent=pct(d.history.return_pct);document.getElementById('ret').className=Number(d.history.return_pct)>=0?'good':'bad';document.getElementById('dd').textContent=pct(d.history.max_drawdown_pct);document.getElementById('dd').className=Number(d.history.max_drawdown_pct)>=0?'good':'bad';document.getElementById('peak').textContent=money(d.history.peak);document.getElementById('samples').textContent=d.history.points.length;document.getElementById('datastatus').textContent='Estado de datos: '+d.history.status}catch(e){const el=document.getElementById('error');el.textContent=e.message;el.style.display='block'}}load();setInterval(load,15000);
+async function load(){try{const r=await fetch('/api/state?period='+period,{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'No se pudo cargar el estado');document.getElementById('error').style.display='none';document.getElementById('mode').innerHTML='<span class="dot"></span>'+esc(d.mode);document.getElementById('broker').textContent='Broker: '+(d.health?'OK':'ERROR');document.getElementById('market').textContent='Market: '+esc(d.clock.status);document.getElementById('updated').textContent=new Date(d.timestamp).toLocaleTimeString();document.getElementById('equity').textContent=money(d.account.equity);document.getElementById('cash').textContent=money(d.account.cash);document.getElementById('bp').textContent=money(d.account.buying_power);document.getElementById('pnl').textContent=money(d.account.day_pnl);document.getElementById('pnl').className='value '+cls(d.account.day_pnl);document.getElementById('pnlmeta').textContent=d.account.day_pnl_source;document.getElementById('poscount').textContent=d.positions.length;document.getElementById('opencount').textContent=d.open_orders;document.getElementById('positions').innerHTML=renderPositions(d.positions);document.getElementById('orders').innerHTML=renderOrders(d.orders);document.getElementById('fills').innerHTML=renderFills(d.fills);document.getElementById('ordersmeta').textContent=d.orders.length+' visibles · '+d.open_orders+' abiertas';document.getElementById('possummary').textContent=money(d.risk.invested)+' gross exposure';document.getElementById('invested').textContent=money(d.risk.invested);document.getElementById('maxstoploss').textContent=money(d.risk.max_loss_if_all_stops_hit);document.getElementById('stopnote').textContent=(d.risk.stop_risk_status==='incomplete'?'Cobertura incompleta · ':'')+d.risk.stop_risk_note;document.getElementById('unrealized').textContent=money(d.risk.unrealized);document.getElementById('unrealized').className=Number(d.risk.unrealized)>=0?'good':'bad';document.getElementById('largest').textContent=d.risk.largest_symbol||'—';document.getElementById('concentration').textContent=d.risk.concentration==null?'—':d.risk.concentration.toFixed(1)+'%';['stock','crypto','cash'].forEach(k=>{document.getElementById(k+'bar').style.width=Math.min(100,d.risk[k+'pct']||0)+'%';document.getElementById(k+'pct').textContent=(d.risk[k+'pct']??0).toFixed(1)+'%' });document.getElementById('fillsn').textContent=d.execution.fills??'—';document.getElementById('buysell').textContent=(d.execution.buys??'—')+' / '+(d.execution.sells??'—');document.getElementById('filledorders').textContent=d.execution.filled_orders??'—';document.getElementById('execopen').textContent=d.open_orders;document.getElementById('execmeta').textContent=d.execution.window;setHealth('apihealth',d.health,'Connected');setHealth('modehealth',true,d.mode);setHealth('clockhealth',true,d.clock.status+(d.clock.is_open?' · open':' · closed'));setHealth('historyhealth',d.history.status==='OK',d.history.status);drawChart(d.history.points);document.getElementById('ret').textContent=pct(d.history.return_pct);document.getElementById('ret').className=Number(d.history.return_pct)>=0?'good':'bad';document.getElementById('dd').textContent=pct(d.history.max_drawdown_pct);document.getElementById('dd').className=Number(d.history.max_drawdown_pct)>=0?'good':'bad';document.getElementById('peak').textContent=money(d.history.peak);document.getElementById('samples').textContent=d.history.points.length;document.getElementById('datastatus').textContent='Estado de datos: '+d.history.status}catch(e){const el=document.getElementById('error');el.textContent=e.message;el.style.display='block'}}load();setInterval(load,15000);
 </script></body></html>'''
 
 
@@ -87,11 +88,11 @@ def _history(period: str):
         eq, ts = h.get("equity") or [], h.get("timestamp") or []
         points=[]
         for i,value in enumerate(eq):
-            if value is None: continue
+            if number(value) is None: continue
             try:
                 label=datetime.fromtimestamp(float(ts[i]),timezone.utc).strftime("%d/%m %H:%M") if i<len(ts) and ts[i] else ""
                 points.append({"equity":float(value),"label":label})
-            except (TypeError,ValueError): pass
+            except (TypeError,ValueError,OverflowError,OSError): pass
         vals=[p["equity"] for p in points]
         if len(vals)<2: return {"points":points,"return_pct":None,"max_drawdown_pct":None,"peak":max(vals) if vals else None,"status":"Historial insuficiente"}
         peak=vals[0]; max_dd=0.0
@@ -106,16 +107,28 @@ def _history(period: str):
 
 def state(period: str):
     account=alpaca_get("/v2/account")
-    positions=alpaca_get("/v2/positions")
+    positions=active_positions(alpaca_get("/v2/positions"))
     orders=alpaca_get("/v2/orders",{"status":"all","limit":50,"direction":"desc","nested":"false"})
-    open_orders=alpaca_get("/v2/orders",{"status":"open","limit":50,"direction":"desc","nested":"false"})
+    open_orders=alpaca_get("/v2/orders",{"status":"open","limit":500,"direction":"desc","nested":"true"})
+    stops_complete = len(open_orders) < 500
+    open_orders = flatten_orders(open_orders)
     fills=[]
+    fills_available = True
+    seen_fills = set()
     try:
         activities=alpaca_get("/v2/account/activities/FILL",{"direction":"desc","page_size":50})
+        if not isinstance(activities, list):
+            fills_available = False
         if isinstance(activities,list):
             for a in activities:
-                fills.append({"date":a.get("transaction_time") or a.get("date"),"symbol":a.get("symbol"),"side":a.get("side"),"qty":a.get("qty"),"price":a.get("price"),"activity_type":a.get("activity_type") or "FILL"})
-    except requests.RequestException: pass
+                if number(a.get("qty"), 0) <= 0 or number(a.get("price"), 0) <= 0:
+                    continue
+                if a.get("id") and a["id"] in seen_fills:
+                    continue
+                if a.get("id"):
+                    seen_fills.add(a["id"])
+                fills.append({"id":a.get("id"),"order_id":a.get("order_id"),"date":a.get("transaction_time") or a.get("date"),"symbol":a.get("symbol"),"side":a.get("side"),"qty":a.get("qty"),"price":a.get("price"),"activity_type":a.get("activity_type") or "FILL"})
+    except requests.RequestException: fills_available = False
     day_pnl=None; pnl_source="No disponible"
     try:
         # Alpaca account is the single source of truth for the headline daily P&L.
@@ -125,7 +138,9 @@ def state(period: str):
             pnl_source="Alpaca account · equity - last_equity"
     except (TypeError, ValueError):
         pass
-    invested=sum(float(p.get("market_value") or 0) for p in positions)
+    invested=sum(abs(number(p.get("market_value"), 0)) for p in positions)
+    net_value=sum(number(p.get("market_value"), 0) for p in positions)
+    stops = stop_risk(positions, open_orders, stops_complete)
     unrealized=sum(float(p.get("unrealized_pl") or 0) for p in positions)
     largest=max(positions,key=lambda p:abs(float(p.get("market_value") or 0)),default=None)
     equity=float(account.get("equity") or 0); cash=float(account.get("cash") or 0)
@@ -136,7 +151,7 @@ def state(period: str):
     clean_positions=[{k:p.get(k) for k in ("symbol","qty","avg_entry_price","current_price","market_value","unrealized_pl","unrealized_plpc")} for p in positions]
     clean_orders=[{k:o.get(k) for k in ("created_at","symbol","side","type","qty","status","filled_qty","filled_avg_price")} for o in orders]
     buys=sum(1 for f in fills if str(f.get("side")).lower()=="buy"); sells=sum(1 for f in fills if str(f.get("side")).lower()=="sell")
-    filled_orders=sum(1 for o in orders if str(o.get("status")).lower()=="filled")
+    filled_orders=len({f["order_id"] for f in fills if f.get("order_id")}) if all(f.get("order_id") for f in fills) else None
     try:
         clock=alpaca_get("/v2/clock")
         clock_status="OPEN" if clock.get("is_open") else "CLOSED"
@@ -148,7 +163,7 @@ def state(period: str):
     account_long_mv=float(account.get("long_market_value") or 0)
     account_short_mv=float(account.get("short_market_value") or 0)
     account_equity_reconciled=account_cash+account_long_mv+account_short_mv
-    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"last_equity":account.get("last_equity"),"portfolio_value":account.get("portfolio_value"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{"invested":invested,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100,"account_long_market_value":account_long_mv,"account_short_market_value":account_short_mv,"position_value_delta":invested-(account_long_mv+account_short_mv),"equity_reconciliation_delta":account_equity-account_equity_reconciled},"execution":{"fills":len(fills),"buys":buys,"sells":sells,"filled_orders":filled_orders,"window":"últimos 50 fills"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}
+    return {"mode":"PAPER" if PAPER else "LIVE","health":True,"account":{"equity":account.get("equity"),"cash":account.get("cash"),"buying_power":account.get("buying_power"),"last_equity":account.get("last_equity"),"portfolio_value":account.get("portfolio_value"),"day_pnl":day_pnl,"day_pnl_source":pnl_source},"positions":clean_positions,"orders":clean_orders,"fills":fills,"open_orders":len(open_orders),"risk":{**stops,"invested":invested,"net_exposure":net_value,"unrealized":unrealized,"largest_symbol":largest.get("symbol") if largest else None,"concentration":concentration,"stockpct":stock_value/denom*100,"cryptopct":crypto_value/denom*100,"cashpct":abs(cash)/denom*100,"account_long_market_value":account_long_mv,"account_short_market_value":account_short_mv,"position_value_delta":net_value-(account_long_mv+account_short_mv),"equity_reconciliation_delta":account_equity-account_equity_reconciled},"execution":{"fills":len(fills) if fills_available else None,"buys":buys if fills_available else None,"sells":sells if fills_available else None,"filled_orders":filled_orders if fills_available else None,"status":"OK" if fills_available else "unavailable","window":"ejecuciones en últimos 50 registros FILL"},"clock":clock_info,"history":_history(period),"timestamp":datetime.now(timezone.utc).isoformat()}
 
 
 class Handler(BaseHTTPRequestHandler):

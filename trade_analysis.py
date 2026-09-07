@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
+import math
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -32,13 +33,14 @@ def _text(order: Any, field: str) -> str:
 
 def _float(order: Any, field: str) -> float:
     try:
-        return float(getattr(order, field, 0) or 0)
+        value = float(getattr(order, field, 0) or 0)
+        return value if math.isfinite(value) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
 def _is_filled(order: Any) -> bool:
-    return "filled" in _text(order, "status")
+    return _float(order, "filled_qty") > 0 and _float(order, "filled_avg_price") > 0
 
 
 def _is_protection_sell(order: Any) -> bool:
@@ -83,15 +85,21 @@ def reconstruct_trades(orders: Iterable[Any]) -> list[Trade]:
     buys: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
     trades: list[Trade] = []
 
-    normalized = []
-    for order in orders:
-        if not _is_filled(order):
+    snapshots = {}
+    visited = set()
+    pending = list(orders)
+    for order in pending:
+        if id(order) in visited:
             continue
-        symbol = _symbol(order)
-        qty = _float(order, "filled_qty")
-        price = _float(order, "filled_avg_price")
-        if symbol and qty > 0 and price > 0:
-            normalized.append(order)
+        visited.add(id(order))
+        pending.extend(getattr(order, "legs", None) or [])
+        if not _is_filled(order) or not _symbol(order):
+            continue
+        key = str(getattr(order, "id", "") or "") or id(order)
+        previous = snapshots.get(key)
+        if previous is None or _float(order, "filled_qty") > _float(previous, "filled_qty"):
+            snapshots[key] = order
+    normalized = list(snapshots.values())
 
     normalized.sort(key=_time_key)
 
@@ -108,7 +116,7 @@ def reconstruct_trades(orders: Iterable[Any]) -> list[Trade]:
                                  "order_id": order_id, "time": order_time})
             continue
 
-        if "sell" not in side or _is_protection_sell(order):
+        if "sell" not in side:
             continue
 
         while qty_remaining > 1e-12 and buys[symbol]:

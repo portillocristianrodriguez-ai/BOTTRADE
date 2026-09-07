@@ -34,21 +34,37 @@ class TradeAnalysisTests(unittest.TestCase):
         self.assertEqual(trades[1].qty, 2)
         self.assertEqual(trades[1].pnl, 20)
 
-    def test_ignores_stop_protection(self):
+    def test_counts_executed_stop_protection(self):
         orders = [
             Order("MSFT", "buy", filled_qty=10, filled_avg_price=100, id="b1", filled_at="2026-01-01T10:00:00+00:00"),
             Order("MSFT", "sell", filled_qty=10, filled_avg_price=95, id="sl1", filled_at="2026-01-01T11:00:00+00:00", type="stop"),
         ]
 
-        self.assertEqual(reconstruct_trades(orders), [])
+        self.assertEqual(len(reconstruct_trades(orders)), 1)
 
-    def test_ignores_oco_protection(self):
+    def test_counts_executed_oco_protection(self):
         orders = [
             Order("NVDA", "buy", filled_qty=2, filled_avg_price=100, id="b1", filled_at="2026-01-01T10:00:00+00:00"),
             Order("NVDA", "sell", filled_qty=2, filled_avg_price=110, id="oco1", filled_at="2026-01-01T11:00:00+00:00", order_class="oco"),
         ]
 
-        self.assertEqual(reconstruct_trades(orders), [])
+        self.assertEqual(len(reconstruct_trades(orders)), 1)
+
+    def test_canceled_partial_fills_nested_legs_and_duplicate_snapshots(self):
+        buy = Order("AAPL", "buy", status="canceled", filled_qty=3, filled_avg_price=100, id="b", filled_at="2026-01-01T10:00:00Z")
+        stale = Order("AAPL", "buy", status="partially_filled", filled_qty=1, filled_avg_price=100, id="b", filled_at="2026-01-01T10:00:00Z")
+        sell = Order("AAPL", "sell", status="canceled", filled_qty=2, filled_avg_price=90, id="s", type="stop", filled_at="2026-01-01T11:00:00Z")
+        parent = Order("AAPL", "sell", status="new", id="p", legs=[sell])
+        trades = reconstruct_trades([stale, buy, parent, sell])
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].qty, 2)
+        self.assertEqual(trades[0].pnl, -20)
+
+    def test_zero_and_nonfinite_fills_do_not_create_trades(self):
+        for qty in [0, float("inf"), float("nan")]:
+            orders = [Order("AAPL", "buy", filled_qty=qty, filled_avg_price=100),
+                      Order("AAPL", "sell", filled_qty=1, filled_avg_price=110)]
+            self.assertEqual(reconstruct_trades(orders), [])
 
     def test_metrics(self):
         orders = [

@@ -1145,6 +1145,12 @@ def obtener_datos(
 # OBTENER POSICIÓN
 # ============================================================
 
+def _posiciones_con_cantidad(posiciones):
+    """Ignore broker tombstones without rounding away real fractional positions."""
+    from execution_guard import _float
+    return [p for p in posiciones if _float(getattr(p, "qty", None), None) != 0]
+
+
 def obtener_posicion(
     ticker: str,
 ):
@@ -1173,14 +1179,14 @@ def obtener_posicion(
                 )
             )
 
-            if posicion is not None:
+            if posicion is not None and _posiciones_con_cantidad([posicion]):
                 return posicion
 
         except Exception:
             pass
 
         posiciones = (
-            cliente_trading.get_all_positions()
+            _posiciones_con_cantidad(cliente_trading.get_all_positions())
         )
 
         for posicion in posiciones:
@@ -1221,7 +1227,7 @@ def obtener_todas_las_posiciones():
     try:
 
         return (
-            cliente_trading.get_all_positions()
+            _posiciones_con_cantidad(cliente_trading.get_all_positions())
         )
 
     except Exception as e:
@@ -1260,7 +1266,7 @@ def contar_posiciones_abiertas() -> int:
     try:
 
         posiciones = (
-            cliente_trading.get_all_positions()
+            _posiciones_con_cantidad(cliente_trading.get_all_positions())
         )
 
         return len(
@@ -1331,7 +1337,7 @@ def obtener_resumen_cuenta():
         )
 
         posiciones = (
-            cliente_trading.get_all_positions()
+            _posiciones_con_cantidad(cliente_trading.get_all_positions())
         )
 
         beneficio_posiciones = 0.0
@@ -1377,7 +1383,7 @@ def obtener_posiciones_telegram():
     try:
 
         posiciones = (
-            cliente_trading.get_all_positions()
+            _posiciones_con_cantidad(cliente_trading.get_all_positions())
         )
 
         resultado = []
@@ -1523,8 +1529,7 @@ def obtener_resumen_cuenta_secundaria():
         )
 
         posiciones = (
-            cliente_trading_secundaria
-            .get_all_positions()
+            _posiciones_con_cantidad(cliente_trading_secundaria.get_all_positions())
         )
 
         beneficio_posiciones = 0.0
@@ -1588,8 +1593,7 @@ def obtener_posiciones_secundaria():
     try:
 
         posiciones = (
-            cliente_trading_secundaria
-            .get_all_positions()
+            _posiciones_con_cantidad(cliente_trading_secundaria.get_all_positions())
         )
 
         resultado = []

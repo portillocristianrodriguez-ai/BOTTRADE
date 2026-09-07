@@ -39,6 +39,13 @@ class FakeClient:
 
 
 class SafetyTests(unittest.TestCase):
+    def test_exposure_ignores_zero_qty_and_counts_signed_short_value(self):
+        from types import SimpleNamespace
+        positions = [SimpleNamespace(qty="0", market_value="999999"),
+                     SimpleNamespace(qty="-2", market_value="-200"),
+                     SimpleNamespace(qty="1e-11", market_value="0.01")]
+        self.assertAlmostEqual(execution_guard.exposicion_actual(positions), 200.01)
+
     def test_unknown_pending_market_buy_fails_closed(self):
         ok, reason = execution_guard.validar_exposicion_compra(
             equity=10000,

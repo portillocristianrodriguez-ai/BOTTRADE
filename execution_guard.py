@@ -39,7 +39,9 @@ def _float(value, default: float = 0.0) -> float:
 
 
 def posicion_notional(position) -> float:
-    market_value = _float(getattr(position, "market_value", 0))
+    if _float(getattr(position, "qty", None), None) == 0:
+        return 0.0
+    market_value = abs(_float(getattr(position, "market_value", 0)))
     if market_value > 0:
         return market_value
     qty = abs(_float(getattr(position, "qty", 0)))
