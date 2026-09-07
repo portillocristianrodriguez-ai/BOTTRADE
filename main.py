@@ -1784,6 +1784,9 @@ def registrar_observacion_pattern(
             "pattern_observations.jsonl",
         )
 
+        from pattern_dataset_cleaner import sanitize_record
+        sanitize_record(observacion)
+
         with _pattern_lock:
 
             with open(
@@ -1796,6 +1799,7 @@ def registrar_observacion_pattern(
                     json.dumps(
                         observacion,
                         ensure_ascii=False,
+                        allow_nan=False,
                     )
                     + "\n"
                 )

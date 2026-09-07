@@ -29,7 +29,7 @@ def _volume_ratio(current_volume, reference_volume):
     if current is None or current < 0 or reference is None or reference <= _MIN_REFERENCE_VOLUME:
         return None
     ratio = current / reference
-    return _f(ratio)
+    return _f(ratio) if ratio <= 1_000_000 else None
 
 
 def evaluar(df, *, es_crypto=False, min_score=72.0):
@@ -57,7 +57,8 @@ def evaluar(df, *, es_crypto=False, min_score=72.0):
         for col in ("open", "high", "low", "close", "volume"):
             if col in x:
                 x[col] = pd.to_numeric(x[col], errors="coerce")
-        x = x.dropna(subset=["high", "close", "volume"])
+        x = x.dropna(subset=["high", "close"])
+        x["volume"] = x["volume"].where(x["volume"].map(lambda v: _f(v) is not None and v >= 0))
         if len(x) < 30:
             return vacio
 
@@ -82,7 +83,7 @@ def evaluar(df, *, es_crypto=False, min_score=72.0):
         prior3 = _f((close.iloc[-4] / close.iloc[-7] - 1.0) * 100.0)
         accel = _f((ret3 or 0.0) - (prior3 or 0.0))
 
-        vol_base = volume.shift(1).rolling(20, min_periods=10).mean().iloc[-1]
+        vol_base = volume.shift(1).rolling(20, min_periods=20).mean().iloc[-1]
         vol_ratio = _volume_ratio(volume.iloc[-1], vol_base)
 
         delta = close.diff()

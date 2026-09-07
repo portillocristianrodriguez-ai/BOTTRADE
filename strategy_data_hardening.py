@@ -9,20 +9,15 @@ from __future__ import annotations
 
 import functools
 import logging
-import math
 
 import pandas as pd
 
 log = logging.getLogger(__name__)
-_EPSILON = 1e-12
 
 
 def _sanear_ratio(serie: pd.Series, media: pd.Series) -> pd.Series:
-    numerador = pd.to_numeric(serie, errors="coerce")
-    denominador = pd.to_numeric(media, errors="coerce")
-    ratio = numerador / denominador.where(denominador.abs() > _EPSILON)
-    ratio = ratio.where(ratio.map(lambda value: isinstance(value, (int, float)) and math.isfinite(float(value))), 0.0)
-    return pd.to_numeric(ratio, errors="coerce").fillna(0.0)
+    from volume_data_hardening import safe_volume_ratio
+    return safe_volume_ratio(serie, media).fillna(0.0)
 
 
 def _sanear_indicadores(df: pd.DataFrame) -> pd.DataFrame:
@@ -35,14 +30,11 @@ def _sanear_indicadores(df: pd.DataFrame) -> pd.DataFrame:
         salida["volumen_ratio"] = _sanear_ratio(salida["volume"], salida["volumen_media"])
     if "volumen_media_corta" in salida.columns:
         salida["aceleracion_volumen"] = _sanear_ratio(salida["volume"], salida["volumen_media_corta"])
-    for columna in ("volumen_ratio", "aceleracion_volumen"):
-        if columna in salida.columns:
-            salida[columna] = salida[columna].clip(lower=0.0, upper=100.0)
     return salida
 
 
 def instalar(estrategia_module) -> None:
-    """Envuelve `calcular_indicadores` para impedir ratios de volumen absurdos."""
+    """Compatibility wrapper; ratios are now validated at their origin."""
     original = getattr(estrategia_module, "calcular_indicadores", None)
     if not callable(original) or getattr(original, "_bottrade_strategy_data_hardening", False):
         return
@@ -50,7 +42,7 @@ def instalar(estrategia_module) -> None:
     @functools.wraps(original)
     def calcular_indicadores_seguro(df):
         try:
-            return _sanear_indicadores(original(df))
+            return original(df)
         except Exception:
             return pd.DataFrame()
 

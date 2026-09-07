@@ -18,6 +18,15 @@ _MIN_REFERENCE_VOLUME = 1e-12
 _MAX_NUMERIC_RATIO = 1_000_000.0
 
 
+def safe_volume_ratio(volume, mean):
+    """Unknown ratios remain missing; never cap corruption into a strong signal."""
+    volume = pd.to_numeric(volume, errors="coerce")
+    mean = pd.to_numeric(mean, errors="coerce")
+    ratio = volume / mean.where(mean.map(_finite_positive))
+    valid = [_ratio_consistente(v, m, r) for v, m, r in zip(volume, mean, ratio)]
+    return ratio.where(pd.Series(valid, index=volume.index))
+
+
 def _finite_positive(value):
     try:
         number = float(value)

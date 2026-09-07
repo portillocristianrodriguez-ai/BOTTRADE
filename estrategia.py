@@ -1,6 +1,8 @@
 import pandas as pd
 import ta
 import config
+import numpy as np
+from volume_data_hardening import safe_volume_ratio
 
 
 def calcular_indicadores(df):
@@ -10,7 +12,9 @@ def calcular_indicadores(df):
         if columna not in df.columns:
             return pd.DataFrame()
         df[columna] = pd.to_numeric(df[columna], errors="coerce")
-    df = df.dropna(subset=columnas_numericas).sort_index()
+    df[columnas_numericas] = df[columnas_numericas].replace([np.inf, -np.inf], np.nan)
+    df = df.dropna(subset=["open", "high", "low", "close"]).sort_index()
+    df["volume"] = df["volume"].where(df["volume"] >= 0)
     if df.empty:
         return df
 
@@ -24,10 +28,10 @@ def calcular_indicadores(df):
     df["macd_signal"] = macd.macd_signal()
     df["macd_hist"] = macd.macd_diff()
     periodo_volumen = max(5, int(config.VOLUMEN_SMA_PERIODO))
-    df["volumen_media"] = df["volume"].shift(1).rolling(periodo_volumen, min_periods=5).mean()
-    df["volumen_ratio"] = pd.to_numeric(df["volume"] / df["volumen_media"].replace(0, pd.NA), errors="coerce")
+    df["volumen_media"] = df["volume"].shift(1).rolling(periodo_volumen, min_periods=periodo_volumen).mean()
+    df["volumen_ratio"] = safe_volume_ratio(df["volume"], df["volumen_media"])
     df["volumen_media_corta"] = df["volume"].shift(1).rolling(3, min_periods=3).mean()
-    df["aceleracion_volumen"] = pd.to_numeric(df["volume"] / df["volumen_media_corta"].replace(0, pd.NA), errors="coerce")
+    df["aceleracion_volumen"] = safe_volume_ratio(df["volume"], df["volumen_media_corta"])
     df["adx"] = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
     df["volumen_valido"] = df["volume"] > 0
     return df
