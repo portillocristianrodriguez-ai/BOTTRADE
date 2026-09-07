@@ -132,7 +132,9 @@ def run(
 ) -> tuple[dict, pd.DataFrame, list[Trade]]:
     """Ejecuta una simulación sin look-ahead."""
     data = _clean(df)
-    if len(data) < int(config.EMA_TENDENCIA) + 5:
+    if len(data) < 2:
+        raise ValueError("Se necesitan al menos dos barras para simular ejecuciones.")
+    if signal_fn is None and len(data) < int(config.EMA_TENDENCIA) + 5:
         raise ValueError("No hay suficientes barras para la EMA de tendencia.")
     risk = float(config.RISK_PER_TRADE_PCT if risk_per_trade_pct is None else risk_per_trade_pct)
     sl = float(config.STOP_LOSS_PCT if stop_loss_pct is None else stop_loss_pct)

@@ -35,14 +35,15 @@ def test_wide_spread_blocks():
     assert result["reason"] == "spread_too_wide"
 
 
-def test_thin_book_blocks_oversized_order():
+def test_thin_book_reduces_oversized_order():
     client = Client(Book([Level(100.10, 10)], [Level(99.90, 100)]))
     result = execution_quality.evaluate_crypto_orderbook(client, "BTC/USD", 5000)
-    assert result["ok"] is False
-    assert result["reason"] == "thin_top_of_book"
+    assert result["ok"] is True
+    assert result["reason"] == "reduced_for_depth"
+    assert 25 <= result["recommended_notional"] <= 100.10 * 10 * 0.60
 
 
 def test_missing_client_is_non_blocking():
     result = execution_quality.evaluate_crypto_orderbook(None, "BTC/USD", 5000)
     assert result["ok"] is True
-    assert result["reason"] == "disabled_or_unavailable"
+    assert result["reason"] == "unavailable"

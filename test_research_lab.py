@@ -28,11 +28,11 @@ class ResearchLabTests(unittest.TestCase):
             "volume": [1000] * 20,
         }, index=idx)
         windows = walk_forward(df, signal_fn=lambda _: "ESPERAR", train_bars=8, test_bars=4)
-        self.assertEqual(len(windows), 2)
+        self.assertEqual(len(windows), 3)
         self.assertEqual(windows[0].test_start, idx[8])
         self.assertEqual(windows[0].test_end, idx[11])
         summary = summarize_walk_forward(windows)
-        self.assertEqual(summary["windows"], 2)
+        self.assertEqual(summary["windows"], 3)
         self.assertEqual(summary["consistency_pct"], 0.0)
 
     def test_walk_forward_selects_candidate_only_from_train_slice(self):
