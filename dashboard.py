@@ -57,7 +57,7 @@ HTML = r'''<!doctype html>
 </div><script>
 let period='1D';
 const money=n=>n==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(Number(n));
-const num=n=>n==null?'—':new Intl.NumberFormat('en-US',{maximumFractionDigits:4}).format(Number(n));
+const num=n=>n==null?'—':Number(n)!==0&&Math.abs(Number(n))<0.0001?Number(n).toExponential(3):new Intl.NumberFormat('en-US',{maximumFractionDigits:4}).format(Number(n));
 const pct=n=>n==null?'—':(Number(n)>=0?'+':'')+Number(n).toFixed(2)+'%';
 const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
 const cls=n=>Number(n)>=0?'good':'bad';
@@ -145,8 +145,8 @@ def state(period: str):
     largest=max(positions,key=lambda p:abs(float(p.get("market_value") or 0)),default=None)
     equity=float(account.get("equity") or 0); cash=float(account.get("cash") or 0)
     concentration=abs(float(largest.get("market_value") or 0))/equity*100 if largest and equity else None
-    stock_value=sum(abs(float(p.get("market_value") or 0)) for p in positions if "/" not in str(p.get("symbol") or ""))
-    crypto_value=sum(abs(float(p.get("market_value") or 0)) for p in positions if "/" in str(p.get("symbol") or ""))
+    stock_value=sum(abs(float(p.get("market_value") or 0)) for p in positions if p.get("asset_class") != "crypto" and "/" not in str(p.get("symbol") or ""))
+    crypto_value=sum(abs(float(p.get("market_value") or 0)) for p in positions if p.get("asset_class") == "crypto" or "/" in str(p.get("symbol") or ""))
     denom=equity or (stock_value+crypto_value+abs(cash)) or 1
     clean_positions=[{k:p.get(k) for k in ("symbol","qty","avg_entry_price","current_price","market_value","unrealized_pl","unrealized_plpc")} for p in positions]
     clean_orders=[{k:o.get(k) for k in ("created_at","symbol","side","type","qty","status","filled_qty","filled_avg_price")} for o in orders]
