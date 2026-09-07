@@ -42,12 +42,31 @@ fields and malformed raw lines. Every changed file gets an exact uniquely named
 backup before atomic replacement. A malformed line requires manual recovery and
 is deliberately not silently discarded. Cleanup is idempotent.
 
-`pattern_observations.jsonl` is ignored and absent from the repository. No deployed
-history has been cleaned as part of this local checkout. To clean the actual file,
-stop its writer, run `python pattern_dataset_cleaner.py /path/to/pattern_observations.jsonl`,
-review the preserved backup and the output, then restart in PAPER. The worker
-entrypoint also invokes cleanup before starting its writer. Do not run the cleaner
-against an actively written file.
+`pattern_observations.jsonl` is ignored and absent from the repository. On
+2026-09-07 the actual Railway PAPER worker was paused for a consistent snapshot.
+All 62,618 observations, bot_state.json and 300 analyst-memory records were
+backed up, downloaded, checksum-verified and restored to the 500 MB volume at
+`/data`. The cleaner found zero invalid fields; both passes changed zero fields,
+and all three restored files matched their original SHA-256 checksums exactly.
+No historical records were deleted. The migration archive is retained locally
+and under `/data/backups/` (SHA-256
+`cf8705ac2991aafb45137e60c056a8f6a89b97b73dfffa3e5cc8364fa9fdcc3e`).
+
+The Railway worker uses `python persistent_worker_entrypoint.py` from
+`fix/dashboard-data-quality-audit`. This entrypoint requires PAPER and waits for
+`/data/.bottrade-restored` before running the worker with `/data` as its working
+directory. Create that marker only after a verified restore. Future restarts reuse
+the persistent state. For manual cleanup, stop the writer before invoking the
+cleaner; its worker-startup invocation runs before the writer starts.
+
+Worker release `f387853c3a1e6b20ba49a83537458e344fc3c079` was verified running
+from `/data` with `ALPACA_PAPER=TRUE`; the first post-migration check found 80 new
+observations and zero invalid fields across the complete dataset. The separate
+web service remains on `app-v1` (release
+`f27d5d6729f0fe0ff066709c6ea6e65f394ca42c`) with its existing application entrypoint.
+The public terminal reports PAPER, broker/history OK, execution counts from FILL
+activity and incomplete stop coverage as unavailable. Nonzero crypto residuals
+are displayed in scientific notation rather than rounded to a false quantity zero.
 
 ## Validation
 
@@ -61,3 +80,7 @@ conflicted with the current adaptive sizing contract; two walk-forward tests use
 custom signals but were blocked by the unrelated default EMA warm-up requirement.
 The simulation now applies that requirement only to its default strategy. The
 20-bar fixture contains three complete rolling windows, which its test now asserts.
+
+Local worker validation: 118 pytest tests plus 6 subtests; 104 unittest tests.
+Web branch validation: 69 pytest tests; 55 unittest tests. Both release CI runs
+passed. Compilation and whitespace checks passed.
