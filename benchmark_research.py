@@ -15,6 +15,7 @@ import numpy as np
 import estrategia
 from portfolio_backtest import run_portfolio
 from simulation_data import clean_ohlcv
+from entry_quality import entry_allowed
 
 
 def reference_signal(name, hist):
@@ -48,9 +49,11 @@ def _json_safe(value):
     return value
 
 
-def compare(data_dir, output, window_days=7, windows=3):
+def compare(data_dir, output, window_days=7, windows=3, end_exclusive=None, strategy_names=None):
     root=Path(data_dir); manifest=json.loads((root/'manifest.json').read_text())
-    end=pd.Timestamp(manifest['end_exclusive']); results=[]; failures=[]
+    end=pd.Timestamp(end_exclusive or manifest['end_exclusive']); results=[]; failures=[]
+    if end > pd.Timestamp(manifest['end_exclusive']):
+        raise ValueError('Evaluation exceeds dataset end')
     for filename,metadata in manifest['files'].items():
         path=root/filename
         if hashlib.sha256(path.read_bytes()).hexdigest()!=metadata['sha256']:
@@ -64,14 +67,18 @@ def compare(data_dir, output, window_days=7, windows=3):
         def cached_indicators(hist):
             return indicators.iloc[:frame.index.get_loc(hist.index[-1])+1]
         signals={}
-        with patch.object(estrategia,'calcular_indicadores',cached_indicators):
+        # Exclude sitecustomize's live portfolio/BTC lookup from offline research.
+        def pure_crypto(hist, ticker):
+            return estrategia._analizar_impulso(hist, ticker, es_crypto=True)
+        with patch.object(estrategia,'calcular_indicadores',cached_indicators), \
+             patch.object(estrategia,'analizar_impulso_crypto',pure_crypto):
             for window in range(windows):
                 start=end-pd.Timedelta(days=window_days*(windows-window))
                 finish=start+pd.Timedelta(days=window_days)
                 test=frame.loc[(frame.index>=start)&(frame.index<finish)]
                 if len(test)<2:
                     failures.append({'symbol':symbol,'window':window,'reason':'insufficient bars'});continue
-                names=['bottrade_signal','trend_20_50','mean_reversion_20_2pct','buy_hold_10pct']
+                names=strategy_names or ['bottrade_signal','trend_20_50','mean_reversion_20_2pct','buy_hold_10pct']
                 for cost_scenario in ['base','stress']:
                     # Conservative tier-1 crypto taker fee assumption, not the
                     # actual account tier; stock cost is a modelling allowance.
@@ -85,9 +92,17 @@ def compare(data_dir, output, window_days=7, windows=3):
                                 timestamp=hist.index[-1]; key=(name,timestamp)
                                 if key not in signals:
                                     context=frame.loc[:timestamp]
-                                    if name=='bottrade_signal':
+                                    if name in {'bottrade_signal','trend_confirmation','trend_not_extended'}:
                                         fn=estrategia._generar_senal_cripto if crypto else estrategia.generar_senal
-                                        signals[key]=fn(context)
+                                        base_key=('bottrade_signal',timestamp)
+                                        if base_key not in signals:
+                                            signals[base_key]=fn(context)
+                                        decision=signals[base_key]
+                                        if decision=='COMPRAR' and name!='bottrade_signal':
+                                            i=frame.index.get_loc(timestamp)
+                                            if i<1 or not entry_allowed(indicators.iloc[i], indicators.iloc[i-1],name):
+                                                decision='ESPERAR'
+                                        signals[key]=decision
                                     else: signals[key]=reference_signal(name,context)
                                 return signals[key]
                             stats,_,trades=run_portfolio({symbol:test},initial_cash=100000,
@@ -102,6 +117,7 @@ def compare(data_dir, output, window_days=7, windows=3):
                         print(symbol,window,cost_scenario,name,round(stats['total_return_pct'],4),flush=True)
                 Path(output).write_text(json.dumps(_json_safe({'status':'in_progress','results':results,'failures':failures}),indent=2,allow_nan=False))
     report={'status':'complete','data_manifest':manifest,'results':results,'failures':failures,
+            'evaluation_end_exclusive':str(end),
             'competitive_advantage_verified':False,
             'limitations':['Recent fixed windows are not evidence across market regimes.',
                            'Isolated long-only signals; no full live portfolio or order-book replay.',
