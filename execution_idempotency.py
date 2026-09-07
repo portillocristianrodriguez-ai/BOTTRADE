@@ -4,9 +4,12 @@ from __future__ import annotations
 import math
 import os
 import uuid
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable, Optional
+
+_BUY_SUBMISSION_LOCK = threading.RLock()
 
 
 _RETRYABLE_FINAL_STATUSES = {
@@ -102,22 +105,16 @@ def _latest_buy_price(cliente: Any, symbol: str):
     try:
         if is_crypto:
             from alpaca.data.historical import CryptoHistoricalDataClient
-            from alpaca.data.requests import CryptoLatestQuoteRequest, CryptoLatestTradeRequest
+            from alpaca.data.requests import CryptoLatestQuoteRequest
             market_client = CryptoHistoricalDataClient()
             quote = market_client.get_crypto_latest_quote(
                 CryptoLatestQuoteRequest(symbol_or_symbols=normalized)
             ).get(normalized)
             price = float(getattr(quote, "ask_price", 0) or 0) if quote else 0.0
             timestamp = getattr(quote, "timestamp", None) if quote else None
-            if price <= 0:
-                trade = market_client.get_crypto_latest_trade(
-                    CryptoLatestTradeRequest(symbol_or_symbols=normalized)
-                ).get(normalized)
-                price = float(getattr(trade, "price", 0) or 0) if trade else 0.0
-                timestamp = getattr(trade, "timestamp", None) if trade else None
         else:
             from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockLatestQuoteRequest, StockLatestTradeRequest
+            from alpaca.data.requests import StockLatestQuoteRequest
             from alpaca.data.enums import DataFeed
             import config
             market_client = StockHistoricalDataClient(config.API_KEY, config.API_SECRET)
@@ -126,12 +123,6 @@ def _latest_buy_price(cliente: Any, symbol: str):
             ).get(normalized)
             price = float(getattr(quote, "ask_price", 0) or 0) if quote else 0.0
             timestamp = getattr(quote, "timestamp", None) if quote else None
-            if price <= 0:
-                trade = market_client.get_stock_latest_trade(
-                    StockLatestTradeRequest(symbol_or_symbols=normalized, feed=DataFeed.IEX)
-                ).get(normalized)
-                price = float(getattr(trade, "price", 0) or 0) if trade else 0.0
-                timestamp = getattr(trade, "timestamp", None) if trade else None
 
         if price <= 0 or not math.isfinite(price):
             return None, "no_valid_price"
@@ -169,7 +160,7 @@ def _refresh_buy_quantity(cliente: Any, order_data: Any):
         return order_data
 
     original_qty = float(getattr(order_data, "qty", 0) or 0)
-    if original_qty <= 0:
+    if original_qty <= 0 or not math.isfinite(original_qty):
         raise ValueError("BUY sin cantidad válida")
 
     symbol = str(getattr(order_data, "symbol", "") or "").upper().strip()
@@ -180,13 +171,14 @@ def _refresh_buy_quantity(cliente: Any, order_data: Any):
     account = cliente.get_account()
     equity = float(getattr(account, "equity", 0) or 0)
     buying_power = float(getattr(account, "buying_power", 0) or 0)
-    if equity <= 0 or buying_power <= 0:
+    if equity <= 0 or buying_power <= 0 or not all(map(math.isfinite, (equity, buying_power))):
         raise ValueError("cuenta BUY inválida")
 
     try:
         import config
         buying_power_buffer = min(0.99, max(0.10, float(getattr(config, "ORDER_BUYING_POWER_BUFFER", 0.85))))
-        max_notional = buying_power * buying_power_buffer
+        max_notional = min(buying_power * buying_power_buffer,
+                           equity * float(config.MAX_SINGLE_POSITION_PCT))
         is_crypto = "/" in symbol or symbol.endswith("/USD")
         if is_crypto:
             equity_cap = equity * float(getattr(config, "CRYPTO_MAX_NOTIONAL_PCT", 0.10))
@@ -201,12 +193,44 @@ def _refresh_buy_quantity(cliente: Any, order_data: Any):
 
     safe_qty = min(original_qty, max_notional / current_price)
     if is_crypto:
-        qty = float(Decimal(str(safe_qty)).quantize(Decimal("0.000001"), rounding=ROUND_DOWN))
+        asset = cliente.get_asset(symbol)
+        increment = Decimal(str(getattr(asset, 'min_trade_increment', None)))
+        minimum = Decimal(str(getattr(asset, 'min_order_size', None)))
+        if not increment.is_finite() or increment <= 0 or not minimum.is_finite() or minimum <= 0:
+            raise ValueError('Metadatos de cantidad crypto inválidos')
+        rounded = (Decimal(str(safe_qty)) / increment).to_integral_value(rounding=ROUND_DOWN) * increment
+        if rounded < minimum:
+            raise ValueError('Cantidad crypto inferior al mínimo del activo')
+        qty = float(rounded)
     else:
         qty = int(safe_qty)
 
     if qty <= 0:
         raise ValueError(f"cantidad BUY nula con precio actual ${current_price:.8f}")
+
+    # Re-read portfolio and pending orders at the final quote, not the scanner's
+    # earlier price. Never liquidates or resizes an existing position.
+    import execution_guard
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.requests import GetOrdersRequest
+    positions = cliente.get_all_positions()
+    pending = cliente.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True))
+    if positions is None or pending is None or len(pending) >= 500:
+        raise ValueError('Snapshot de exposición incompleto')
+    normalized = execution_guard.normalizar_simbolo(symbol)
+    for position in positions:
+        if (execution_guard.normalizar_simbolo(getattr(position, 'symbol', '')) == normalized
+                and execution_guard.posicion_notional(position) > 0):
+            raise ValueError('Ya existe posición para esta compra')
+    for order in pending:
+        if execution_guard.normalizar_simbolo(getattr(order, 'symbol', '')) == normalized:
+            raise ValueError('Ya existe orden pendiente para este activo')
+    ok, reason = execution_guard.validar_exposicion_compra(
+        equity=equity, proposed_notional=qty * current_price, positions=positions,
+        open_orders=pending, max_single_position_pct=config.MAX_SINGLE_POSITION_PCT,
+        max_total_exposure_pct=config.MAX_TOTAL_EXPOSURE_PCT)
+    if not ok:
+        raise ValueError('Exposición final bloqueada: ' + reason)
 
     if qty != original_qty:
         try:
@@ -221,7 +245,7 @@ def _refresh_buy_quantity(cliente: Any, order_data: Any):
     return _replace_qty(order_data, qty)
 
 
-def submit_order_idempotente(
+def _submit_order_idempotente(
     cliente: Any,
     order_data: Any,
     submit_callable: Optional[Callable[..., Any]] = None,
@@ -252,3 +276,16 @@ def submit_order_idempotente(
         if reconciliada is not None and estado_no_reintentable(reconciliada):
             return reconciliada
         raise
+
+
+def submit_order_idempotente(cliente, order_data, submit_callable=None):
+    """Serialize BUY check/send pairs in this worker; SELL exits never wait on it.
+
+    Broker-side snapshots and client IDs remain required. This process lock is
+    not a distributed lock and is not a guarantee against external traders.
+    """
+    side = str(getattr(order_data, 'side', '') or '').lower()
+    if 'buy' in side:
+        with _BUY_SUBMISSION_LOCK:
+            return _submit_order_idempotente(cliente, order_data, submit_callable)
+    return _submit_order_idempotente(cliente, order_data, submit_callable)

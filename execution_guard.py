@@ -55,10 +55,16 @@ def posicion_notional(position) -> float:
 
 
 def orden_buy_notional(order, unknown_as: float = float("inf")) -> float:
-    notional = _float(getattr(order, "notional", 0))
+    raw_notional = getattr(order, "notional", None)
+    notional = _float(raw_notional, None)
+    if raw_notional is not None and (notional is None or notional < 0):
+        return unknown_as
+    notional = notional or 0.0
     if notional > 0:
         return notional
-    qty = abs(_float(getattr(order, "qty", 0)))
+    qty = _float(getattr(order, "qty", None), None)
+    if qty is None or qty < 0:
+        return unknown_as
     price = _float(getattr(order, "limit_price", 0))
     if qty > 0 and price > 0:
         return qty * price

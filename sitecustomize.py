@@ -42,6 +42,17 @@ def _execution_quality_notional(broker_module, ticker, proposed):
         )
         if not quality.get("ok", False):
             return 0.0, str(quality.get("reason", "blocked"))
+        from execution_costs import planned_trade_economics
+        impact = quality.get('estimated_impact_pct')
+        economics = planned_trade_economics(
+            target_fraction=config.TAKE_PROFIT_PCT, stop_fraction=config.STOP_LOSS_PCT,
+            fee_bps=config.CRYPTO_ASSUMED_TAKER_FEE_BPS,
+            entry_impact_pct=impact,
+            exit_impact_pct=max(float(impact), config.CRYPTO_ASSUMED_EXIT_IMPACT_PCT),
+            minimum_ratio=config.CRYPTO_MIN_NET_REWARD_RISK)
+        broker_module.log.info('[COST] %s: planned=%s (assumptions, not expected profit)', ticker, economics)
+        if not economics.get('ok', False):
+            return 0.0, economics.get('reason', 'invalid_cost_inputs')
         recommended = float(quality.get("recommended_notional", 0) or 0)
         if not math.isfinite(recommended):
             return 0.0, "invalid_recommendation"

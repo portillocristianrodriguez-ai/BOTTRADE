@@ -31,6 +31,15 @@ class FakeClient:
     def get_account(self):
         return type("Account", (), {"equity": "10000", "buying_power": "10000"})()
 
+    def get_all_positions(self):
+        return []
+
+    def get_orders(self, filter=None):
+        return list(self.orders.values())
+
+    def get_asset(self, symbol):
+        return type('Asset', (), {'min_trade_increment':'0.000000001', 'min_order_size':'0.000001'})()
+
     def submit_order(self, order_data=None):
         self.submit_calls += 1
         order = FakeOrder(status="new")
