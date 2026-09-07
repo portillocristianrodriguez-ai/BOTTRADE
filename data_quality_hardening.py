@@ -41,8 +41,8 @@ def _avisar_historial_insuficiente(ticker, actual: int, minimo: int) -> None:
     clave = str(ticker)
     ahora = time.monotonic()
     with _warning_lock:
-        ultimo = _last_warning.get(clave, 0.0)
-        if ahora - ultimo < _WARNING_INTERVAL_SECONDS:
+        ultimo = _last_warning.get(clave)
+        if ultimo is not None and ahora - ultimo < _WARNING_INTERVAL_SECONDS:
             return
         _last_warning[clave] = ahora
     log.warning(
