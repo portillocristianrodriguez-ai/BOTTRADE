@@ -18,6 +18,8 @@ def main():
         print(f'Waiting for verified data restore in {directory}; worker has not started', flush=True)
         time.sleep(10)
     os.chdir(directory)
+    from nvda_take_profit_once import apply_once
+    apply_once(directory)
     worker = Path(__file__).resolve().with_name('worker_entrypoint.py')
     os.execv(sys.executable, [sys.executable, str(worker)])
 
