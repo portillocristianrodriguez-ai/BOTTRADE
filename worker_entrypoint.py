@@ -16,6 +16,8 @@ import telegram_webhook
 import dynamic_exit_manager_v2
 import review_safety_hardening
 import worker
+import dynamic_exit_manager_v2
+import review_safety_hardening
 
 
 if __name__ == "__main__":
