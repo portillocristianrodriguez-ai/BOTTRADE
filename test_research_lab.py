@@ -2,6 +2,8 @@ import unittest
 
 import pandas as pd
 
+import config
+
 from backtest_engine import Trade
 from research_lab import monte_carlo, summarize_walk_forward, walk_forward
 
@@ -19,30 +21,43 @@ class ResearchLabTests(unittest.TestCase):
         self.assertEqual(first.simulations, 200)
 
     def test_walk_forward_only_reports_out_of_sample_windows(self):
-        idx = pd.date_range("2026-01-01", periods=20, freq="h", tz="UTC")
+        # Each slice must satisfy the real backtest warm-up requirement.
+        window_bars = int(config.EMA_TENDENCIA) + 5
+        n = 3 * window_bars  # One training slice followed by two OOS slices.
+        idx = pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC")
         df = pd.DataFrame({
-            "open": range(100, 120),
-            "high": range(101, 121),
-            "low": range(99, 119),
-            "close": range(100, 120),
-            "volume": [1000] * 20,
+            "open": range(100, 100 + n),
+            "high": range(101, 101 + n),
+            "low": range(99, 99 + n),
+            "close": range(100, 100 + n),
+            "volume": [1000] * n,
         }, index=idx)
-        windows = walk_forward(df, signal_fn=lambda _: "ESPERAR", train_bars=8, test_bars=4)
+        windows = walk_forward(
+            df, signal_fn=lambda _: "ESPERAR",
+            train_bars=window_bars, test_bars=window_bars,
+        )
         self.assertEqual(len(windows), 2)
-        self.assertEqual(windows[0].test_start, idx[8])
-        self.assertEqual(windows[0].test_end, idx[11])
+        self.assertEqual(windows[0].test_start, idx[window_bars])
+        self.assertEqual(windows[0].test_end, idx[2 * window_bars - 1])
+        self.assertEqual(windows[1].test_start, idx[2 * window_bars])
+        self.assertEqual(windows[1].test_end, idx[-1])
+        for window in windows:
+            self.assertLess(window.train_end, window.test_start)
         summary = summarize_walk_forward(windows)
         self.assertEqual(summary["windows"], 2)
         self.assertEqual(summary["consistency_pct"], 0.0)
 
     def test_walk_forward_selects_candidate_only_from_train_slice(self):
-        idx = pd.date_range("2026-01-01", periods=30, freq="h", tz="UTC")
+        test_bars = int(config.EMA_TENDENCIA) + 5
+        train_bars = 2 * test_bars
+        n = train_bars + test_bars  # Exactly one candidate-selection window.
+        idx = pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC")
         df = pd.DataFrame({
-            "open": [100.0] * 30,
-            "high": [101.0] * 30,
-            "low": [99.0] * 30,
-            "close": [100.0] * 30,
-            "volume": [1000.0] * 30,
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.0] * n,
+            "volume": [1000.0] * n,
         }, index=idx)
         calls = []
 
@@ -52,8 +67,8 @@ class ResearchLabTests(unittest.TestCase):
 
         windows = walk_forward(
             df,
-            train_bars=20,
-            test_bars=10,
+            train_bars=train_bars,
+            test_bars=test_bars,
             parameter_grid=[{"risk_per_trade_pct": 0.01}, {"risk_per_trade_pct": 0.02}],
             signal_factory=factory,
             min_train_trades=0,
