@@ -10,6 +10,7 @@ import persistence_hardening
 import strategy_data_hardening
 import volume_data_hardening
 import pattern_dataset_cleaner
+import pattern_storage
 import telegram_hardening
 import telegram_startup_summary
 import telegram_webhook
@@ -27,7 +28,9 @@ if __name__ == "__main__":
     persistence_hardening.instalar(bot)
     strategy_data_hardening.instalar(estrategia)
     volume_data_hardening.instalar(estrategia)
+    pattern_storage.compact(bot.config.PATTERN_DATA_FILE)
     pattern_dataset_cleaner.limpiar(bot.config)
+    pattern_storage.install(bot)
     telegram_hardening.instalar(bot)
     telegram_webhook.instalar(bot)
     review_safety_hardening.instalar(bot, dynamic_exit_manager_v2)
