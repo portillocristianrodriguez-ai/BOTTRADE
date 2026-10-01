@@ -117,8 +117,15 @@ def _instalar_guard_vender_dust(broker, log):
 
 
 def _partial_sell(broker, ticker, fraction):
+    # Share the full-sale lock so check and submit cannot overlap in this worker.
+    with getattr(broker, "_lock_ordenes", _LOCK):
+        return _partial_sell_locked(broker, ticker, fraction)
+
+
+def _partial_sell_locked(broker, ticker, fraction):
     from alpaca.trading.enums import OrderSide, TimeInForce
     from alpaca.trading.requests import MarketOrderRequest
+    from review_safety_hardening import _status_activo
 
     position = broker.obtener_posicion(ticker)
     if position is None:
@@ -129,8 +136,7 @@ def _partial_sell(broker, ticker, fraction):
 
     for order in broker.obtener_ordenes_ticker(ticker):
         side = str(getattr(order, "side", "")).lower()
-        status = str(getattr(order, "status", "")).lower()
-        if "sell" in side and any(x in status for x in ("new", "accepted", "pending", "partially")):
+        if "sell" in side and _status_activo(order):
             return None
 
     fraction = max(0.10, min(1.0, _num(fraction, 0.5)))

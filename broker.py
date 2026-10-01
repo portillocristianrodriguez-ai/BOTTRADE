@@ -1682,7 +1682,7 @@ def obtener_posiciones_secundaria():
 # ÓRDENES ABIERTAS
 # ============================================================
 
-def obtener_ordenes_abiertas():
+def obtener_ordenes_abiertas(*, strict=False):
 
     try:
 
@@ -1703,6 +1703,8 @@ def obtener_ordenes_abiertas():
             f"órdenes abiertas: {e}"
         )
 
+        if strict:
+            raise
         return []
 
 

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, fix/dashboard-data-quality-audit]
   pull_request:
-    branches: [main]
+    branches: [main, fix/dashboard-data-quality-audit]
 
 jobs:
   test:
