@@ -40,6 +40,7 @@ class ExecutionQualityTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertLess(result["spread_pct"], 0.90)
+        self.assertEqual(result["recommended_notional"], 5000)
 
     def test_wide_spread_blocks(self):
         client = Client(Book(
@@ -62,7 +63,23 @@ class ExecutionQualityTests(unittest.TestCase):
             min_top_depth_usd=1500, max_depth_ratio=0.60,
         )
         self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "reduced_for_depth")
         self.assertLess(result["recommended_notional"], 5000)
+        self.assertGreaterEqual(result["recommended_notional"], 25)
+
+    def test_too_thin_book_blocks_below_minimum(self):
+        client = Client(Book(
+            asks=[Level(100.10, 0.10)],
+            bids=[Level(99.90, 100)],
+        ))
+        result = execution_quality.evaluate_crypto_orderbook(
+            client, "BTC/USD", 5000, max_spread_pct=0.90,
+            min_top_depth_usd=1500, max_depth_ratio=0.60,
+            min_execution_notional_usd=25,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "insufficient_depth")
+        self.assertLess(result["recommended_notional"], 25)
 
     def test_missing_data_is_non_blocking(self):
         result = execution_quality.evaluate_crypto_orderbook(
