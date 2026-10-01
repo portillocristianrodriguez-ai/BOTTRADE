@@ -7,6 +7,8 @@ crypto, la detección de órdenes activas/protecciones y reconcilia en PAPER
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
+import threading
 
 
 class _CooldownRegistry(dict):
@@ -15,15 +17,20 @@ class _CooldownRegistry(dict):
         return self.get(key, default)
 
 
-_ACTIVE_STATUS_TOKENS = (
+_ACTIVE_STATUSES = {
     "new", "accepted", "pending", "held", "partially_filled",
-    "partially", "open", "calculated",
-)
+    "partially", "open", "calculated", "pending_new", "pending_cancel",
+    "pending_replace", "accepted_for_bidding", "stopped", "suspended",
+    "done_for_day",
+}
+
+
+def _enum_value(value):
+    return str(getattr(value, "value", value) or "").lower().rsplit(".", 1)[-1]
 
 
 def _status_activo(order) -> bool:
-    status = str(getattr(order, "status", "") or "").lower()
-    return any(token in status for token in _ACTIVE_STATUS_TOKENS)
+    return _enum_value(getattr(order, "status", "")) in _ACTIVE_STATUSES
 
 
 def _edad_segundos(order, now=None):
@@ -51,21 +58,30 @@ def _reconciliar_market_buys_paper(bot_module, broker, log):
     parcialmente ejecutadas.
     """
     config = getattr(bot_module, "config", None)
-    if not bool(getattr(config, "PAPER", False)):
+    if getattr(config, "PAPER", False) is not True:
         return 0
     client = getattr(broker, "cliente_trading", None)
     if client is None:
         return 0
     canceladas = 0
     try:
-        for order in broker.obtener_ordenes_abiertas():
+        orders = broker.obtener_ordenes_abiertas(strict=True)
+    except Exception as exc:
+        if log:
+            log.warning("[REVIEW-FIX] No se pudieron consultar BUY market antiguas: %s", exc)
+        return 0
+    for order in orders:
+        try:
             if not _status_activo(order):
                 continue
-            side = str(getattr(order, "side", "") or "").lower()
-            order_type = str(getattr(order, "type", "") or "").lower()
-            filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+            side = _enum_value(getattr(order, "side", ""))
+            order_type = _enum_value(getattr(order, "type", ""))
+            order_class = _enum_value(getattr(order, "order_class", ""))
+            filled_qty = float(getattr(order, "filled_qty", None))
             age = _edad_segundos(order)
-            if "buy" not in side or "market" not in order_type or filled_qty > 0:
+            if side != "buy" or order_type != "market" or order_class != "simple":
+                continue
+            if not math.isfinite(filled_qty) or filled_qty != 0:
                 continue
             if age is None or age < 1800:
                 continue
@@ -76,9 +92,9 @@ def _reconciliar_market_buys_paper(bot_module, broker, log):
                     "[REVIEW-FIX] %s: BUY market PAPER sin fill cancelada tras %.0f min (id=%s).",
                     getattr(order, "symbol", "?"), age / 60.0, order.id,
                 )
-    except Exception as exc:
-        if log:
-            log.warning("[REVIEW-FIX] Reconciliación de BUY market antiguas incompleta: %s", exc)
+        except Exception as exc:
+            if log:
+                log.warning("[REVIEW-FIX] BUY market omitida durante reconciliación: %s", exc)
     return canceladas
 
 
@@ -102,7 +118,7 @@ def instalar(bot_module, dynamic_exit_module) -> bool:
             try:
                 objetivo = broker.ticker_comparacion(ticker)
                 resultado = []
-                for order in original_abiertas():
+                for order in original_abiertas(strict=True):
                     if not _status_activo(order):
                         continue
                     if broker.ticker_comparacion(getattr(order, "symbol", "")) == objetivo:
@@ -110,14 +126,22 @@ def instalar(bot_module, dynamic_exit_module) -> bool:
                 return resultado
             except Exception as exc:
                 if log:
-                    log.warning("[REVIEW-FIX] %s: fallback de órdenes activas: %s", ticker, exc)
-                return original_ticker(ticker)
+                    log.warning("[REVIEW-FIX] %s: consulta de órdenes activas fallida: %s", ticker, exc)
+                raise
         obtener_ordenes_ticker_activo._review_active_orders = True
         broker.obtener_ordenes_ticker = obtener_ordenes_ticker_activo
 
     original_vender = getattr(broker, "vender", None)
     if callable(original_vender) and not getattr(original_vender, "_review_sell_guard", False):
+        sell_lock = getattr(broker, "_lock_ordenes", None)
+        if sell_lock is None:
+            sell_lock = threading.RLock()
+            broker._lock_ordenes = sell_lock
         def vender_guardado(ticker):
+            with sell_lock:
+                return vender_comprobado(ticker)
+
+        def vender_comprobado(ticker):
             try:
                 if broker.es_cripto(ticker):
                     for order in broker.obtener_ordenes_ticker(ticker):
@@ -132,6 +156,7 @@ def instalar(bot_module, dynamic_exit_module) -> bool:
             except Exception as exc:
                 if log:
                     log.warning("[REVIEW-FIX] %s: no se pudo comprobar SELL activa: %s", ticker, exc)
+                return None
             return original_vender(ticker)
         vender_guardado._review_sell_guard = True
         broker.vender = vender_guardado
